@@ -54,7 +54,8 @@ for (let i = 0; i < 4; i++) {
   pregs.push((await q1(`insert into preguntas (enunciado, opciones, correcta, etiquetas)
     values ($1, array['A','B','C','D','E'], $2, array['pase']) returning id`, [`Pregunta ${i}`, i % 5])).id);
 }
-ok(await falla(`insert into preguntas (enunciado, opciones, correcta) values ('x', array['a','b'], 3)`), 'check: correcta fuera de rango rechazada');
+ok(await falla(`insert into preguntas (enunciado, opciones, correcta) values ('x', array['a','b','c','d','e'], 5)`), 'check: correcta fuera de rango rechazada');
+ok(await falla(`insert into preguntas (enunciado, opciones, correcta) values ('x', array['a','b','c','d'], 0)`), 'check: 4 opciones rechazada (siempre 5)');
 
 const pins = await q(`select * from generar_pines($1)`, [g]);
 ok(pins.length === 3 && pins.every(p => /^\d{4}$/.test(p.pin)), 'generar_pines devuelve 3 PIN de 4 cifras');
@@ -167,6 +168,30 @@ ok(Number(nA.nota) === 5 && nA.presentado, `notas_sesion Ana = ${nA.nota}`);
 ok(Number(nB.nota) === 0 && nB.errores === 1, `notas_sesion Bru = ${nB.nota} (1 error, mínimo 0)`);
 ok(nC.presentado === false && nC.nota === null, 'Carla no presentada -> nota null, no 0');
 
+// Registro test a test en public.notas
+const regNota = async (alumno) => q1(`select n.* from notas n join alumnos a on a.id = n.alumno_id
+                                      where n.sesion_id = $1 and a.id_alumno = $2`, [s, alumno]);
+ok((await q(`select * from notas where sesion_id = $1`, [s])).length === 3, 'finalizar guarda 3 filas en notas');
+const rA = await regNota('u100');
+ok(Number(rA.nota) === 5 && rA.puntos > 0, `notas Ana: ${rA.nota}, ${rA.puntos} puntos`);
+ok((await regNota('u102')).presentado === false, 'notas Carla: no presentado');
+ok(await falla(`update notas set nota = 10 where sesion_id = $1`, [s], /permission denied/), 'profe no puede editar notas a mano');
+
+const anular = (v) => q(`update respuestas set anulada = $2 where posicion = 1 and participacion_id =
+  (select p.id from participaciones p join alumnos a on a.id = p.alumno_id where a.id_alumno = 'u100' and p.sesion_id = $1)`, [s, v]);
+await anular(true);
+ok(Number((await regNota('u100')).nota) === 2.5, 'anular respuesta tras finalizar -> nota recalculada a 2.5');
+await anular(false);
+ok(Number((await regNota('u100')).nota) === 5, 'desanular -> vuelve a 5');
+
+await comoAnon();
+r = (await q1(`select enviar_respuesta($1, 2::smallint, 0::smallint, now() - interval '60 seconds') r`, [tokB])).r;
+ok(r.ok && r.estado === 'registrada', 'Bru sincroniza tarde tras finalizar -> registrada');
+ok(await falla(`select * from notas`, [], /permission denied/), 'anon: notas -> permission denied');
+await comoProfe();
+const rB = await regNota('u101');
+ok(rB.errores === 2 && rB.tardias === 2 && Number(rB.nota) === 0, `notas Bru recalculadas: ${rB.errores} errores, ${rB.tardias} tardías`);
+
 // segunda sesión: Ana no viene, Bru saca 10
 const s2 = (await q1(`insert into sesiones (grupo_id, titulo, barajar_preguntas, penalizacion) values ($1,'Clase 2',true,0) returning id`, [g])).id;
 await q(`select asignar_preguntas($1, $2::uuid[])`, [s2, pregs.slice(0, 2)]);
@@ -192,6 +217,22 @@ ok(Number(nt0.find(x => x.id_alumno === 'u100').nota_trimestre) === 2.5, 'ausenc
 const ntD = await q(`select * from notas_trimestre($1, null, null, 1)`, [g]);
 ok(Number(ntD.find(x => x.id_alumno === 'u101').nota_trimestre) === 10, 'descartar peor 1 -> Bru 10');
 ok(Object.keys(tA.notas).length === 2 && tA.notas[s2] === null, 'columnas por sesión con null = no presentado');
+
+// Clasificación general del grupo (puntos de todos los tests)
+const cg = await q(`select * from clasificacion_grupo($1)`, [g]);
+const suma = await q1(`select sum(puntos)::int t from notas n join alumnos a on a.id = n.alumno_id where a.id_alumno = 'u101'`);
+const cB = cg.find(x => x.nombre === 'Bru');
+ok(cg.length === 3 && cB.puntos === suma.t && cB.tests === 2, `clasificacion_grupo: ${cg.map(x => x.puesto + '. ' + x.nombre + ' ' + x.puntos).join(', ')}`);
+ok(cg[0].puesto === 1 && cg[0].puntos >= cg[1].puntos && cg[2].nombre === 'Carla' && cg[2].puntos === 0, 'ordenada por puntos, Carla 0');
+
+await comoAnon();
+const mc = (await q1(`select mi_clasificacion($1) r`, [jb2.token])).r;
+ok(mc.top.length === 3 && mc.total_alumnos === 3 && mc.top.some(x => x.yo && x.nombre === 'Bru P.'), `mi_clasificacion: ${JSON.stringify(mc.top)}`);
+ok(mc.yo.puntos === cB.puntos && mc.top.every(x => !('nota' in x)), 'mi_clasificacion: puesto propio, sin notas ajenas');
+const mh = (await q1(`select mi_historial($1) r`, [j2.token])).r;
+ok(mh.tests.length === 2 && Number(mh.tests[0].nota) === 5 && mh.tests[1].presentado === false && Number(mh.media_provisional) === 5,
+   `mi_historial Ana: ${mh.tests.map(t => t.titulo + '=' + t.nota).join(', ')}`);
+await comoProfe();
 
 console.log(fallos ? `\n${fallos} FALLOS` : '\nTodo OK');
 process.exit(fallos ? 1 : 0);

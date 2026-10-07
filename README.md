@@ -17,6 +17,18 @@ Los alumnos responden desde el móvil con tiempo por pregunta. Cada sesión da u
 4. Importación (Moodle XML, CSV, JSON) y exportación a Moodle
 5. Pruebas de caída de red
 
+## Notas y clasificación
+
+- Cada pregunta tiene **siempre 5 opciones** (A-E) y una sola correcta.
+- **Nota del día** (0-10) = 10 × (aciertos − penalización × errores) / nº preguntas, mínimo 0. Penalización 0 o 0,25 por sesión.
+- **Registro test a test**: al finalizar cada sesión se guarda una fila por alumno en `notas` (nota, aciertos, errores, en blanco, tardías, puntos).
+  Si después anulas una respuesta, corriges la clave o llega una respuesta sincronizada tarde, se recalcula sola.
+  Quien no entra queda como *no presentado* (sin nota, no 0).
+- **Clasificación general por grupo** (4 grupos, cada uno la suya): suma de puntos tipo Kahoot (acierto + rapidez) de todos los tests.
+  Solo motiva, no cuenta para la nota. Se ve en el proyector y en el móvil (top 10 con nombre + inicial y su propio puesto). Nunca se enseñan notas ajenas.
+- El alumno ve en el móvil su historial de notas test a test.
+- **Nota del trimestre**: media de las notas del día, con opción de descartar las N peores y de contar ausencias como 0.
+
 ## Cómo funciona la seguridad
 
 - **Profesor**: usuario de Supabase Auth dado de alta en la tabla `profesores`. Ve y edita todo vía RLS.

@@ -60,9 +60,9 @@ create table public.preguntas (
   clave_duplicado text generated always as (lower(regexp_replace(trim(enunciado), '\s+', ' ', 'g'))) stored,
   creada_en       timestamptz not null default now(),
   actualizada_en  timestamptz not null default now(),
-  check (array_ndims(opciones) = 1 and array_length(opciones, 1) between 2 and 5),
+  check (array_ndims(opciones) = 1 and array_length(opciones, 1) = 5),
   check (array_position(opciones, null) is null),
-  check (correcta >= 0 and correcta < array_length(opciones, 1))
+  check (correcta between 0 and 4)
 );
 create index preguntas_etiquetas_idx on public.preguntas using gin (etiquetas);
 create index preguntas_duplicado_idx on public.preguntas (clave_duplicado);
@@ -103,7 +103,8 @@ create table public.sesion_preguntas (
   abierta_en  timestamptz,
   cierra_en   timestamptz,
   primary key (sesion_id, posicion),
-  check (correcta >= 0 and correcta < array_length(opciones, 1))
+  check (array_length(opciones, 1) = 5),
+  check (correcta between 0 and 4)
 );
 
 create table public.participaciones (
@@ -136,6 +137,24 @@ create table public.respuestas (
     references public.sesion_preguntas (sesion_id, posicion) on delete cascade
 );
 create index respuestas_sesion_posicion_idx on public.respuestas (sesion_id, posicion);
+
+-- Registro test a test: una fila por alumno del grupo y sesión finalizada.
+-- Se escribe al finalizar y se recalcula sola si se anula una respuesta o se
+-- corrige la clave de una sesión ya finalizada. presentado = false -> nota null.
+create table public.notas (
+  sesion_id    uuid not null references public.sesiones (id) on delete cascade,
+  alumno_id    uuid not null references public.alumnos (id) on delete cascade,
+  presentado   boolean not null,
+  aciertos     smallint,
+  errores      smallint,
+  en_blanco    smallint,
+  tardias      smallint,
+  nota         numeric(4, 2),
+  puntos       integer not null default 0,
+  calculada_en timestamptz not null default now(),
+  primary key (sesion_id, alumno_id)
+);
+create index notas_alumno_idx on public.notas (alumno_id);
 
 -- Espejo mínimo del estado de cada sesión, legible por anon y publicado en
 -- Realtime. Sin código ni preguntas: solo "qué turno está abierto y hasta cuándo".
@@ -228,6 +247,115 @@ begin
   end if;
   return v_cierre is not null and clock_timestamp() > v_cierre + interval '2 seconds';
 end;
+$$;
+
+-- Puntos tipo Kahoot (1000 al instante, 500 al agotar el tiempo). Solo
+-- motivan: no entran en la nota. Solo cuentan preguntas ya reveladas.
+create function public._puntos(p_participacion uuid) returns integer
+language sql stable security definer set search_path = ''
+as $$
+  select coalesce(sum(round(1000 * (1 - 0.5 * least(r.ms_respuesta, s.tiempo_s * 1000)::numeric
+                                        / (s.tiempo_s * 1000)))), 0)::integer
+  from public.respuestas r
+  join public.sesion_preguntas sp on sp.sesion_id = r.sesion_id and sp.posicion = r.posicion
+  join public.sesiones s on s.id = r.sesion_id
+  where r.participacion_id = p_participacion and r.aceptada and not r.anulada
+    and r.opcion = sp.correcta and public._revelada(r.sesion_id, r.posicion);
+$$;
+
+-- Cálculo en vivo de la sesión, sin comprobar permisos (uso interno).
+create function public._calcular_notas(p_sesion uuid)
+returns table (alumno_id uuid, id_alumno text, nombre text, apellidos text, email text,
+               presentado boolean, aciertos integer, errores integer, en_blanco integer,
+               tardias integer, nota numeric, puntos integer)
+language plpgsql stable security definer set search_path = ''
+as $$
+#variable_conflict use_column
+declare
+  v_grupo uuid;
+  v_pen numeric;
+  v_n integer;
+begin
+  select s.grupo_id, s.penalizacion into v_grupo, v_pen from public.sesiones s where s.id = p_sesion;
+  select count(*) into v_n from public.sesion_preguntas sp where sp.sesion_id = p_sesion;
+  return query
+  select a.id, a.id_alumno, a.nombre, a.apellidos, a.email,
+         p.id is not null,
+         case when p.id is not null then c.aciertos end,
+         case when p.id is not null then c.errores end,
+         case when p.id is not null then v_n - c.aciertos - c.errores end,
+         case when p.id is not null then
+           (select count(*)::integer from public.respuestas r
+            where r.participacion_id = p.id and r.sincronizada_tarde) end,
+         case when p.id is not null then public._nota(c.aciertos, c.errores, v_n, v_pen) end,
+         case when p.id is not null then public._puntos(p.id) else 0 end
+  from public.alumnos a
+  left join public.participaciones p on p.alumno_id = a.id and p.sesion_id = p_sesion
+  left join lateral public._conteo(p.id) c on true
+  where a.grupo_id = v_grupo
+  order by a.apellidos, a.nombre;
+end;
+$$;
+
+create function public._guardar_notas(p_sesion uuid) returns void
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  delete from public.notas where sesion_id = p_sesion;
+  insert into public.notas
+    (sesion_id, alumno_id, presentado, aciertos, errores, en_blanco, tardias, nota, puntos)
+  select p_sesion, c.alumno_id, c.presentado, c.aciertos, c.errores, c.en_blanco,
+         c.tardias, c.nota, c.puntos
+  from public._calcular_notas(p_sesion) c;
+end;
+$$;
+
+-- Mantiene public.notas al día tras finalizar: respuestas sincronizadas tarde,
+-- respuestas anuladas o clave corregida.
+create function public._recalcular_si_finalizada() returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  if exists (select 1 from public.sesiones where id = new.sesion_id and estado = 'finalizada') then
+    perform public._guardar_notas(new.sesion_id);
+  end if;
+  return null;
+end;
+$$;
+
+create trigger respuestas_recalcular_insert after insert on public.respuestas
+  for each row execute function public._recalcular_si_finalizada();
+create trigger respuestas_recalcular_anulada after update of anulada on public.respuestas
+  for each row when (old.anulada is distinct from new.anulada)
+  execute function public._recalcular_si_finalizada();
+create trigger sesion_preguntas_recalcular after update of correcta on public.sesion_preguntas
+  for each row when (old.correcta is distinct from new.correcta)
+  execute function public._recalcular_si_finalizada();
+
+-- Clasificación general del grupo: suma de puntos de sus tests finalizados.
+create function public._clasificacion(p_grupo uuid, p_desde date default null, p_hasta date default null)
+returns table (puesto integer, alumno_id uuid, nombre text, apellidos text,
+               puntos integer, tests integer, aciertos integer)
+language sql stable security definer set search_path = ''
+as $$
+  with t as (
+    select a.id, a.nombre, a.apellidos,
+           coalesce(sum(n.puntos), 0)::integer as puntos,
+           (count(n.sesion_id) filter (where n.presentado))::integer as tests,
+           coalesce(sum(n.aciertos), 0)::integer as aciertos
+    from public.alumnos a
+    left join (public.notas n
+               join public.sesiones s on s.id = n.sesion_id and s.estado = 'finalizada'
+                and (p_desde is null or s.fecha >= p_desde)
+                and (p_hasta is null or s.fecha <= p_hasta))
+      on n.alumno_id = a.id
+    where a.grupo_id = p_grupo
+    group by a.id, a.nombre, a.apellidos
+  )
+  select (rank() over (order by t.puntos desc))::integer, t.id, t.nombre, t.apellidos,
+         t.puntos, t.tests, t.aciertos
+  from t
+  order by t.puntos desc, t.apellidos, t.nombre;
 $$;
 
 create function public._ventanas(p_sesion uuid) returns jsonb
@@ -420,7 +548,6 @@ declare
   v_turno integer;
   v_abre timestamptz;
   v_cierra timestamptz;
-  v_n_opciones integer;
   v_t timestamptz;
   v_aceptada boolean;
   v_id bigint;
@@ -436,9 +563,7 @@ begin
     return jsonb_build_object('ok', false, 'error', 'pregunta');
   end if;
 
-  select array_length(opciones, 1) into v_n_opciones
-  from public.sesion_preguntas where sesion_id = s.id and posicion = p_posicion;
-  if p_opcion is null or p_opcion < 0 or p_opcion >= v_n_opciones then
+  if p_opcion is null or p_opcion not between 0 and 4 then
     return jsonb_build_object('ok', false, 'error', 'opcion');
   end if;
 
@@ -516,7 +641,69 @@ begin
                  then public._nota(c.aciertos, c.errores, v_n, s.penalizacion) end,
     'aciertos', case when v_todas then c.aciertos end,
     'errores', case when v_todas then c.errores end,
+    'puntos', public._puntos(p.id),
     'total', v_n
+  );
+end;
+$$;
+
+-- Historial test a test del alumno en su grupo (solo sesiones finalizadas).
+-- Sirve cualquier token suyo de ese grupo, también de sesiones ya cerradas.
+create function public.mi_historial(p_token text) returns jsonb
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  p public.participaciones%rowtype;
+  v_grupo uuid;
+begin
+  p := public._participacion(p_token);
+  select grupo_id into v_grupo from public.sesiones where id = p.sesion_id;
+  return jsonb_build_object(
+    'tests', (
+      select coalesce(jsonb_agg(jsonb_build_object(
+               'sesion_id', s.id, 'titulo', s.titulo, 'fecha', s.fecha,
+               'presentado', coalesce(n.presentado, false), 'nota', n.nota,
+               'aciertos', n.aciertos, 'errores', n.errores, 'en_blanco', n.en_blanco,
+               'puntos', coalesce(n.puntos, 0))
+               order by s.fecha, s.creada_en), '[]'::jsonb)
+      from public.sesiones s
+      left join public.notas n on n.sesion_id = s.id and n.alumno_id = p.alumno_id
+      where s.grupo_id = v_grupo and s.estado = 'finalizada'),
+    -- Media simple de los tests hechos. La oficial (ausencias, descartes) la fija el profesor.
+    'media_provisional', (
+      select round(avg(n.nota), 2)
+      from public.notas n join public.sesiones s on s.id = n.sesion_id
+      where n.alumno_id = p.alumno_id and n.presentado and s.estado = 'finalizada')
+  );
+end;
+$$;
+
+-- Clasificación general del grupo vista desde el móvil: top N con nombre
+-- corto (nombre + inicial) y puntos, más el puesto propio. Nunca notas ajenas.
+create function public.mi_clasificacion(p_token text, p_top integer default 10) returns jsonb
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  p public.participaciones%rowtype;
+  v_grupo uuid;
+begin
+  p := public._participacion(p_token);
+  select grupo_id into v_grupo from public.sesiones where id = p.sesion_id;
+  return jsonb_build_object(
+    'top', (
+      select coalesce(jsonb_agg(jsonb_build_object(
+               'puesto', c.puesto,
+               'nombre', c.nombre || case when c.apellidos <> '' then ' ' || left(c.apellidos, 1) || '.' else '' end,
+               'puntos', c.puntos,
+               'yo', c.alumno_id = p.alumno_id)
+               order by c.n), '[]'::jsonb)
+      from (select x.*, row_number() over () as n
+            from public._clasificacion(v_grupo) x
+            limit least(greatest(p_top, 1), 50)) c),
+    'yo', (
+      select jsonb_build_object('puesto', c.puesto, 'puntos', c.puntos, 'tests', c.tests)
+      from public._clasificacion(v_grupo) c where c.alumno_id = p.alumno_id),
+    'total_alumnos', (select count(*) from public.alumnos where grupo_id = v_grupo)
   );
 end;
 $$;
@@ -741,41 +928,33 @@ begin
   if not found then
     raise exception 'sesion_no_finalizable';
   end if;
+  perform public._guardar_notas(p_sesion);
   perform public._publicar_vivo(p_sesion);
 end;
 $$;
 
--- presentado = false -> "no presentado" (nota null), nunca 0.
+-- En vivo (sirve también durante la sesión). presentado = false -> nota null, nunca 0.
+-- El registro definitivo test a test está en public.notas.
 create function public.notas_sesion(p_sesion uuid)
 returns table (alumno_id uuid, id_alumno text, nombre text, apellidos text, email text,
                presentado boolean, aciertos integer, errores integer, en_blanco integer,
-               tardias integer, nota numeric)
+               tardias integer, nota numeric, puntos integer)
 language plpgsql stable security definer set search_path = ''
 as $$
-#variable_conflict use_column
-declare
-  v_grupo uuid;
-  v_pen numeric;
-  v_n integer;
 begin
   perform public._exigir_profe();
-  select s.grupo_id, s.penalizacion into v_grupo, v_pen from public.sesiones s where s.id = p_sesion;
-  select count(*) into v_n from public.sesion_preguntas sp where sp.sesion_id = p_sesion;
-  return query
-  select a.id, a.id_alumno, a.nombre, a.apellidos, a.email,
-         p.id is not null,
-         case when p.id is not null then c.aciertos end,
-         case when p.id is not null then c.errores end,
-         case when p.id is not null then v_n - c.aciertos - c.errores end,
-         case when p.id is not null then
-           (select count(*)::integer from public.respuestas r
-            where r.participacion_id = p.id and r.sincronizada_tarde) end,
-         case when p.id is not null then public._nota(c.aciertos, c.errores, v_n, v_pen) end
-  from public.alumnos a
-  left join public.participaciones p on p.alumno_id = a.id and p.sesion_id = p_sesion
-  left join lateral public._conteo(p.id) c on true
-  where a.grupo_id = v_grupo
-  order by a.apellidos, a.nombre;
+  return query select * from public._calcular_notas(p_sesion);
+end;
+$$;
+
+create function public.clasificacion_grupo(p_grupo uuid, p_desde date default null, p_hasta date default null)
+returns table (puesto integer, alumno_id uuid, nombre text, apellidos text,
+               puntos integer, tests integer, aciertos integer)
+language plpgsql stable security definer set search_path = ''
+as $$
+begin
+  perform public._exigir_profe();
+  return query select * from public._clasificacion(p_grupo, p_desde, p_hasta);
 end;
 $$;
 
@@ -799,11 +978,15 @@ begin
       and (p_desde is null or s.fecha >= p_desde)
       and (p_hasta is null or s.fecha <= p_hasta)
   ),
+  -- Alumno dado de alta después de una sesión = no presentado en ella.
   n as (
-    select ns.alumno_id, s.id as sesion_id, ns.nota,
-           case when ns.presentado then ns.nota
+    select a.id as alumno_id, s.id as sesion_id, nt.nota,
+           case when coalesce(nt.presentado, false) then nt.nota
                 when p_ausencia_cero then 0::numeric end as valor
-    from ses s cross join lateral public.notas_sesion(s.id) ns
+    from public.alumnos a
+    cross join ses s
+    left join public.notas nt on nt.sesion_id = s.id and nt.alumno_id = a.id
+    where a.grupo_id = p_grupo
   ),
   r as (
     select n.alumno_id, n.valor,
@@ -831,25 +1014,22 @@ returns table (nombre text, apellidos text, puntos integer, aciertos integer)
 language plpgsql stable security definer set search_path = ''
 as $$
 #variable_conflict use_column
-declare
-  v_ms numeric;
 begin
   perform public._exigir_profe();
-  select s.tiempo_s * 1000 into v_ms from public.sesiones s where s.id = p_sesion;
   return query
-  select a.nombre, a.apellidos,
-         coalesce(sum(round(1000 * (1 - 0.5 * least(r.ms_respuesta, v_ms) / v_ms)))
-                  filter (where r.opcion = sp.correcta), 0)::integer as puntos,
-         (count(*) filter (where r.opcion = sp.correcta))::integer
-  from public.participaciones p
-  join public.alumnos a on a.id = p.alumno_id
-  left join public.respuestas r
-    on r.participacion_id = p.id and r.aceptada and not r.anulada
-   and public._revelada(p_sesion, r.posicion)
-  left join public.sesion_preguntas sp on sp.sesion_id = r.sesion_id and sp.posicion = r.posicion
-  where p.sesion_id = p_sesion
-  group by a.id, a.nombre, a.apellidos
-  order by puntos desc, a.apellidos
+  select x.nombre, x.apellidos, x.puntos, x.aciertos
+  from (
+    select a.nombre, a.apellidos, public._puntos(p.id) as puntos,
+           (select count(*)::integer
+            from public.respuestas r
+            join public.sesion_preguntas sp on sp.sesion_id = r.sesion_id and sp.posicion = r.posicion
+            where r.participacion_id = p.id and r.aceptada and not r.anulada
+              and r.opcion = sp.correcta and public._revelada(p_sesion, r.posicion)) as aciertos
+    from public.participaciones p
+    join public.alumnos a on a.id = p.alumno_id
+    where p.sesion_id = p_sesion
+  ) x
+  order by x.puntos desc, x.apellidos
   limit p_limite;
 end;
 $$;
@@ -867,6 +1047,7 @@ alter table public.sesion_preguntas enable row level security;
 alter table public.participaciones  enable row level security;
 alter table public.respuestas       enable row level security;
 alter table public.sesiones_vivo    enable row level security;
+alter table public.notas            enable row level security;
 
 create policy profe_lee_su_fila on public.profesores
   for select to authenticated using (user_id = (select auth.uid()));
@@ -886,6 +1067,10 @@ create policy profe_todo on public.participaciones
 create policy profe_todo on public.respuestas
   for all to authenticated using ((select public.es_profe())) with check ((select public.es_profe()));
 
+-- Solo lectura incluso para el profesor: notas se escribe por _guardar_notas.
+create policy profe_lee on public.notas
+  for select to authenticated using ((select public.es_profe()));
+
 create policy vivo_lectura on public.sesiones_vivo
   for select to anon, authenticated using (true);
 
@@ -898,6 +1083,7 @@ revoke all on all sequences in schema public from anon;
 grant select on public.sesiones_vivo to anon;
 -- Nadie escribe sesiones_vivo directamente: solo _publicar_vivo.
 revoke insert, update, delete, truncate on public.sesiones_vivo from authenticated;
+revoke insert, update, delete, truncate on public.notas from authenticated;
 
 alter default privileges in schema public revoke all on tables from anon;
 alter default privileges in schema public revoke execute on functions from public, anon;
@@ -909,6 +1095,8 @@ grant execute on function public.unirse_sesion(text, text, text)                
 grant execute on function public.estado_sesion(text)                                to anon, authenticated;
 grant execute on function public.enviar_respuesta(text, smallint, smallint, timestamptz) to anon, authenticated;
 grant execute on function public.mi_resultado(text)                                 to anon, authenticated;
+grant execute on function public.mi_historial(text)                                 to anon, authenticated;
+grant execute on function public.mi_clasificacion(text, integer)                    to anon, authenticated;
 
 grant execute on function public.es_profe()                                         to authenticated;
 grant execute on function public.generar_pines(uuid, boolean)                       to authenticated;
@@ -922,6 +1110,7 @@ grant execute on function public.finalizar_sesion(uuid)                         
 grant execute on function public.notas_sesion(uuid)                                 to authenticated;
 grant execute on function public.notas_trimestre(uuid, date, date, integer, boolean) to authenticated;
 grant execute on function public.ranking_sesion(uuid, integer)                      to authenticated;
+grant execute on function public.clasificacion_grupo(uuid, date, date)              to authenticated;
 
 -- ---------------------------------------------------------------------
 -- Realtime: alumnos escuchan sesiones_vivo; el proyector, respuestas (RLS profe)
