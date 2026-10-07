@@ -1,0 +1,12 @@
+{
+  "name": "tecno-hockey-quizz",
+  "private": true,
+  "description": "Cuestionarios en clase para DC II Hockey (TecnoCampus). La app no necesita build: esto solo sirve para los tests.",
+  "type": "module",
+  "scripts": {
+    "test": "node supabase/tests/schema.test.mjs"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8"
+  }
+}
