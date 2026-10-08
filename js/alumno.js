@@ -244,6 +244,8 @@ function pintarEspera() {
         Espera a que el profesor empiece.<br>
         ${r.preguntas.length} preguntas · ${r.sesion.tiempo_s} s cada una
       </div>
+      <div class="tarjeta">Tu id de alumno: <strong style="font-size:1.4rem;letter-spacing:.08em">${esc(r.alumno.id_alumno)}</strong><br>
+        <span class="sub">Apúntalo: con él (o tu email) y tu PIN entrarás siempre.</span></div>
       <p class="sub">Las preguntas ya están en tu móvil: si se va la conexión, podrás seguir.</p>
       <button class="btn-link" type="button" data-salir>No soy ${esc(r.alumno.nombre)} · salir</button>
     </section>`;
@@ -519,9 +521,48 @@ async function entrar(codigo, idAlumno, pin, recordar) {
       const hora = new Date(aMs(res.hasta)).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
       return `Demasiados intentos con PIN incorrecto. Prueba otra vez a las ${hora}.`;
     }
-    return 'Id de alumno o PIN incorrectos.';
+    return 'Id (o email) o PIN incorrectos.';
   }
+  await dentro(res, codigo, idAlumno, pin, recordar, desfase);
+  return null;
+}
 
+// Alta del alumno nuevo: devuelve null si entra, o el mensaje de error.
+async function registrar(codigo, nombre, apellidos, email, pin, pin2) {
+  codigo = (codigo || '').trim().toUpperCase();
+  if (!/^[A-Z2-9]{6}$/.test(codigo)) return { error: 'El código de la sesión tiene 6 caracteres: míralo en el proyector.' };
+  if (!nombre.trim() || !apellidos.trim()) return { error: 'Escribe tu nombre y tus apellidos.' };
+  if (!/^[^@\s]+@([a-z0-9-]+\.)*tecnocampus\.cat$/i.test(email.trim())) return { error: 'Usa tu email de TecnoCampus (…@tecnocampus.cat).' };
+  if (!/^\d{4}$/.test(pin)) return { error: 'El PIN son 4 cifras.' };
+  if (pin !== pin2) return { error: 'Los dos PIN no coinciden.' };
+  let res;
+  let desfase = 0;
+  try {
+    desfase = (await medirDesfase()).desfase;
+    res = await rpc('registrar_alumno', {
+      p_codigo: codigo, p_nombre: nombre, p_apellidos: apellidos, p_email: email, p_pin: pin,
+    });
+  } catch (e) {
+    marcarConexion(false);
+    return { error: e instanceof ErrorRed ? 'Sin conexión. Para registrarte hace falta internet.' : 'No se ha podido completar el registro.' };
+  }
+  marcarConexion(true);
+  if (!res.ok) {
+    const mensajes = {
+      codigo: 'No hay ninguna sesión abierta con ese código.',
+      nombre: 'Escribe tu nombre y tus apellidos.',
+      email: 'Usa tu email de TecnoCampus (…@tecnocampus.cat).',
+      pin: 'El PIN son 4 cifras.',
+      grupo_lleno: 'El grupo está completo. Avisa al profesor.',
+    };
+    if (res.error === 'ya_registrado') return { yaRegistrado: res.id_alumno };
+    return { error: mensajes[res.error] || 'No se ha podido completar el registro.' };
+  }
+  await dentro(res, codigo, res.nuevo_id, pin, true, desfase);
+  return null;
+}
+
+async function dentro(res, codigo, idAlumno, pin, recordar, desfase) {
   const anterior = r?.sesion.id === res.sesion.id ? r : null;
   const perms = anterior?.perms || {};
   for (const p of res.preguntas) {
@@ -552,7 +593,6 @@ async function entrar(codigo, idAlumno, pin, recordar) {
     if (item.estado === 'sin_token') { item.estado = 'pendiente'; await cola.poner(item); }
   }
   arrancar();
-  return null;
 }
 
 function arrancar() {
@@ -575,10 +615,11 @@ async function salir() {
   liberarPantalla();
   // La cola no se borra: lo pendiente se sigue enviando con su token.
   await kv.del('sesion');
+  const codigo = r?.sesion.estado === 'finalizada' ? '' : r?.codigo;
   r = null;
   resultadoFinal = null;
   pintarConexion();
-  pintarEntrada();
+  pintarEntrada({ codigo: codigo || '' });
 }
 
 // ---------------------------------------------------------------- pantalla de entrada
@@ -590,20 +631,7 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
   const hayNotas = !!lsGet(LS_TOKEN);
   $app.innerHTML = `
     <div class="portada">
-      <section class="hero">
-        <div class="hero-txt">
-          <p class="antetitulo">Deportes Colectivos II</p>
-          <h1 class="hero-titulo">Hockey <span>hierba</span></h1>
-          <span class="hero-raya" aria-hidden="true"></span>
-          <p class="hero-sub">Cuestionarios de apoyo a la asignatura</p>
-          <ul class="ventajas">
-            <li>${ICONOS.libro}<span>Repasa<br>conceptos</span></li>
-            <li>${ICONOS.barras}<span>Comprueba<br>tu progreso</span></li>
-            <li>${ICONOS.diana}<span>Prepárate<br>para el examen</span></li>
-          </ul>
-        </div>
-        <a class="credito" href="https://commons.wikimedia.org/wiki/File:Field_hockey_banner.jpg" target="_blank" rel="noopener">Foto: fourthandfifteen · CC BY 2.0</a>
-      </section>
+      ${heroHTML()}
       <form class="tarjeta-entrar" id="form-entrar" novalidate autocomplete="off">
         <div class="cabeza">
           <p class="antetitulo">Entra al</p>
@@ -620,7 +648,7 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
         </div>
         <div class="fila">
           <div class="campo">
-            <label for="id-alumno">Id de alumno</label>
+            <label for="id-alumno">Id o email</label>
             <input id="id-alumno" type="text" autocapitalize="none" spellcheck="false" placeholder="Ej. 123456"
                    value="${esc(cred.id_alumno || '')}">
           </div>
@@ -634,6 +662,7 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
           Recordar mi id y PIN en este dispositivo</label>
         ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
         <button class="btn bloque" type="submit" id="btn-entrar">Entrar ${ICONOS.flecha}</button>
+        <button type="button" class="btn secundario bloque" id="btn-registro">¿Primera vez? Regístrate</button>
         ${hayNotas ? '<button type="button" class="btn-link" id="btn-notas">Ver mis notas y clasificación</button>' : ''}
       </form>
     </div>`;
@@ -659,6 +688,87 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
     else $form.querySelector($form.querySelector('#id-alumno').value ? '#pin' : '#id-alumno').focus();
   };
   $form.querySelector('#btn-notas')?.addEventListener('click', () => pintarHistorial());
+  $form.querySelector('#btn-registro').onclick = () => pintarRegistro({ codigo: $codigo.value.toUpperCase() });
+}
+
+function heroHTML() {
+  return `
+    <section class="hero">
+      <div class="hero-txt">
+        <p class="antetitulo">Deportes Colectivos II</p>
+        <h1 class="hero-titulo">Hockey <span>hierba</span></h1>
+        <span class="hero-raya" aria-hidden="true"></span>
+        <p class="hero-sub">Cuestionarios de apoyo a la asignatura</p>
+        <ul class="ventajas">
+          <li>${ICONOS.libro}<span>Repasa<br>conceptos</span></li>
+          <li>${ICONOS.barras}<span>Comprueba<br>tu progreso</span></li>
+          <li>${ICONOS.diana}<span>Prepárate<br>para el examen</span></li>
+        </ul>
+      </div>
+      <a class="credito" href="https://commons.wikimedia.org/wiki/File:Field_hockey_banner.jpg" target="_blank" rel="noopener">Foto: fourthandfifteen · CC BY 2.0</a>
+    </section>`;
+}
+
+function pintarRegistro({ codigo = '', error = '', escrito = {} } = {}) {
+  vista = 'registro';
+  ponerVista('portada');
+  $app.innerHTML = `
+    <div class="portada">
+      ${heroHTML()}
+      <form class="tarjeta-entrar" id="form-registro" novalidate autocomplete="off">
+        <div class="cabeza">
+          <p class="antetitulo">Primera vez</p>
+          <h2>Regístrate</h2>
+          <span class="raya" aria-hidden="true"></span>
+        </div>
+        <p class="sub">Solo una vez. Te daremos un id para siempre y entrarás directamente.</p>
+        <div class="campo">
+          <label for="codigo">Código de la sesión</label>
+          <input id="codigo" class="codigo-input" inputmode="text" maxlength="6" autocapitalize="characters"
+                 spellcheck="false" value="${esc(codigo)}" placeholder="ABC234">
+        </div>
+        <div class="fila">
+          <div class="campo"><label for="nombre">Nombre</label>
+            <input id="nombre" type="text" autocomplete="given-name" value="${esc(escrito.nombre || '')}"></div>
+          <div class="campo"><label for="apellidos">Apellidos</label>
+            <input id="apellidos" type="text" autocomplete="family-name" value="${esc(escrito.apellidos || '')}"></div>
+        </div>
+        <div class="campo"><label for="email">Email de TecnoCampus</label>
+          <input id="email" type="email" autocapitalize="none" spellcheck="false" autocomplete="email"
+                 placeholder="nombre@tecnocampus.cat" value="${esc(escrito.email || '')}"></div>
+        <div class="fila">
+          <div class="campo"><label for="pin">Elige un PIN</label>
+            <input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="4 cifras"></div>
+          <div class="campo"><label for="pin2">Repite el PIN</label>
+            <input id="pin2" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="4 cifras"></div>
+        </div>
+        ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
+        <button class="btn bloque" type="submit" id="btn-registrar">Registrarme y entrar ${ICONOS.flecha}</button>
+        <button type="button" class="btn-link" id="btn-volver">Ya tengo id · volver</button>
+      </form>
+    </div>`;
+  const $f = $app.querySelector('form');
+  const $codigo = $f.querySelector('#codigo');
+  $codigo.oninput = () => { $codigo.value = $codigo.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); };
+  $f.querySelector('#btn-volver').onclick = () => pintarEntrada({ codigo: $codigo.value });
+  $f.onsubmit = async (e) => {
+    e.preventDefault();
+    const val = (id) => $f.querySelector(id).value;
+    const datos = { nombre: val('#nombre'), apellidos: val('#apellidos'), email: val('#email') };
+    const $b = $f.querySelector('#btn-registrar');
+    $b.disabled = true;
+    $b.textContent = 'Registrando…';
+    const res = await registrar(val('#codigo'), datos.nombre, datos.apellidos, datos.email, val('#pin'), val('#pin2'));
+    if (!res) return;
+    if (res.yaRegistrado) {
+      return pintarEntrada({
+        codigo: $codigo.value,
+        error: `Ya estabas registrado. Tu id es ${res.yaRegistrado}: entra con él y tu PIN. Si no recuerdas el PIN, pídeselo al profesor.`,
+        escrito: { id_alumno: res.yaRegistrado, pin: '' },
+      });
+    }
+    pintarRegistro({ codigo: $codigo.value, error: res.error, escrito: datos });
+  };
 }
 
 // ---------------------------------------------------------------- notas y clasificación

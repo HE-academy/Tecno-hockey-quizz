@@ -802,9 +802,12 @@ async function vistaGrupos(grupoId) {
         <label class="btn oscuro peque" style="margin:0">Importar alumnos (CSV)<input type="file" id="csv-alumnos" accept=".csv,.txt" hidden></label>
         <button class="btn peque" type="button" id="pines-nuevos">Generar PIN a quien no tenga</button>
         <button class="btn peque secundario" type="button" id="pines-todos">Regenerar todos los PIN</button>
+        <button class="btn peque secundario" type="button" id="renombrar-grupo">Renombrar</button>
         <button class="btn peque secundario" type="button" id="borrar-grupo">Borrar grupo</button>
       </div>
-      <p class="ayuda">CSV con columnas <code>id_alumno, nombre, apellidos, email</code> (con o sin cabecera; también vale la lista de participantes exportada de Moodle).</p>
+      <p class="ayuda">Los alumnos se registran solos la primera vez que entran con el código de una sesión de este grupo
+        (nombre, apellidos, email de TecnoCampus y un PIN que eligen). Si alguien olvida el PIN, pulsa "Nuevo PIN" y dáselo.
+        Importar un CSV (<code>id_alumno, nombre, apellidos, email</code>, o la lista de participantes de Moodle) es opcional.</p>
       <div id="zona-pines"></div>
       <div id="zona-import"></div>
       <div class="tabla-envoltorio scroll" style="margin-top:12px"><table class="tabla">
@@ -815,7 +818,7 @@ async function vistaGrupos(grupoId) {
             <td><div class="acciones"><button class="btn peque secundario" data-pin="${a.id}">Nuevo PIN</button>
               <button class="btn peque secundario" data-borrar="${a.id}" title="Borrar">✕</button></div></td></tr>`).join('')
           || '<tr><td colspan="5">Sin alumnos. Importa un CSV.</td></tr>'}</tbody></table></div>
-    </div>` : '<div class="caja">Crea tu primer grupo (tienes 4 clases: crea uno por clase).</div>'}`;
+    </div>` : '<div class="caja">Crea un grupo por clase.</div>'}`;
 
   $app.querySelector('#sel-grupo')?.addEventListener('change', (e) => { location.hash = `#/grupos/${e.target.value}`; });
   $app.querySelector('#f-grupo').onsubmit = (e) => {
@@ -870,6 +873,16 @@ async function vistaGrupos(grupoId) {
       intentar(async () => { await q(sb.from('alumnos').delete().eq('id', b.dataset.borrar)); vistaGrupos(actual); }, b);
     };
   });
+  $app.querySelector('#renombrar-grupo').onclick = (e) => {
+    const g = grupos.find((x) => x.id === actual);
+    const nombre = prompt('Nuevo nombre del grupo', g.nombre)?.trim();
+    if (!nombre || nombre === g.nombre) return;
+    intentar(async () => {
+      await q(sb.from('grupos').update({ nombre }).eq('id', actual));
+      toast('Grupo renombrado');
+      vistaGrupos(actual);
+    }, e.target);
+  };
   $app.querySelector('#borrar-grupo').onclick = (e) => {
     const g = grupos.find((x) => x.id === actual);
     if (!confirm(`¿Borrar el grupo "${g.nombre}" con sus alumnos, sesiones y notas? No se puede deshacer.`)) return;

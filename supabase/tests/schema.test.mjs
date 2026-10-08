@@ -241,5 +241,26 @@ ok(mh.tests.length === 2 && Number(mh.tests[0].nota) === 5 && mh.tests[1].presen
    `mi_historial Ana: ${mh.tests.map(t => t.titulo + '=' + t.nota).join(', ')}`);
 await comoProfe();
 
+// Autoinscripción en un grupo aparte
+await comoProfe();
+const g3 = (await q1(`insert into grupos (nombre) values ('Autoinscripción') returning id`)).id;
+const s3 = (await q1(`insert into sesiones (grupo_id, titulo) values ($1, 'Clase 3') returning id`, [g3])).id;
+await q(`select asignar_preguntas($1, $2::uuid[])`, [s3, pregs.slice(0, 2)]);
+const c3 = (await q1(`select lanzar_sesion($1) c`, [s3])).c;
+await comoAnon();
+const reg = (args) => q1(`select registrar_alumno($1, $2, $3, $4, $5) r`, args).then((x) => x.r);
+ok((await reg([c3, 'Nil', 'Roca', 'nil@gmail.com', '1111'])).error === 'email', 'registro: email fuera de tecnocampus.cat rechazado');
+ok((await reg([c3, '', 'Roca', 'nil@tecnocampus.cat', '1111'])).error === 'nombre', 'registro: sin nombre rechazado');
+ok((await reg(['ZZZZZZ', 'Nil', 'Roca', 'nil@tecnocampus.cat', '1111'])).error === 'codigo', 'registro: código inexistente rechazado');
+const r1 = await reg([c3, '  Nil ', 'Roca  Puig', 'Nil.Roca@Alumnes.TecnoCampus.cat', '1111']);
+ok(r1.ok && /^\d{6}$/.test(r1.nuevo_id) && r1.token && r1.preguntas.length === 2, `registro ok: id ${r1.nuevo_id}, ya dentro de la sesión`);
+const r2 = await reg([c3, 'Nil', 'Roca', 'nil.roca@alumnes.tecnocampus.cat', '2222']);
+ok(!r2.ok && r2.error === 'ya_registrado' && r2.id_alumno === r1.nuevo_id, 'registro repetido: recuerda su id y no crea otro');
+const porEmail = (await q1(`select unirse_sesion($1, 'NIL.ROCA@alumnes.tecnocampus.cat', '1111') r`, [c3])).r;
+ok(porEmail.ok, 'entrar con el email en vez del id');
+await comoProfe();
+const nil = await q1(`select nombre, apellidos, email from alumnos where id_alumno = $1`, [r1.nuevo_id]);
+ok(nil.nombre === 'Nil' && nil.apellidos === 'Roca Puig' && nil.email === 'nil.roca@alumnes.tecnocampus.cat', 'nombre y email normalizados');
+
 console.log(fallos ? `\n${fallos} FALLOS` : '\nTodo OK');
 process.exit(fallos ? 1 : 0);

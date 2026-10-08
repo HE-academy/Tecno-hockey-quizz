@@ -46,8 +46,11 @@ create table public.alumnos (
   pin_hash          text,
   intentos_fallidos smallint not null default 0,
   bloqueado_hasta   timestamptz,
+  creado_en         timestamptz not null default now(),
   unique (grupo_id, id_alumno)
 );
+-- Se puede entrar con el id o con el email: el email no se repite en un grupo.
+create unique index alumnos_grupo_email_idx on public.alumnos (grupo_id, lower(email));
 
 create table public.preguntas (
   id              uuid primary key default gen_random_uuid(),
@@ -472,7 +475,8 @@ begin
   end if;
 
   select * into a from public.alumnos
-  where grupo_id = s.grupo_id and id_alumno = trim(p_id_alumno)
+  where grupo_id = s.grupo_id
+    and (id_alumno = trim(p_id_alumno) or lower(email) = lower(trim(p_id_alumno)))
   for update;
   if not found then
     return jsonb_build_object('ok', false, 'error', 'credenciales');
@@ -535,6 +539,61 @@ begin
       select coalesce(jsonb_agg(r.posicion), '[]'::jsonb)
       from public.respuestas r where r.participacion_id = p.id)
   );
+end;
+$$;
+
+-- Autoinscripción: el alumno se da de alta en el grupo de la sesión cuyo
+-- código tiene (solo con sesión abierta y email de TecnoCampus), elige su PIN
+-- y recibe un id de 6 cifras para siempre. Después entra como unirse_sesion.
+create function public.registrar_alumno(
+  p_codigo text, p_nombre text, p_apellidos text, p_email text, p_pin text)
+returns jsonb
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  s public.sesiones%rowtype;
+  v_nombre text := left(regexp_replace(trim(coalesce(p_nombre, '')), '\s+', ' ', 'g'), 60);
+  v_apellidos text := left(regexp_replace(trim(coalesce(p_apellidos, '')), '\s+', ' ', 'g'), 80);
+  v_email text := lower(trim(coalesce(p_email, '')));
+  v_id text;
+  v_existente text;
+begin
+  select * into s from public.sesiones
+  where codigo = upper(trim(p_codigo)) and estado in ('abierta', 'en_curso');
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'codigo');
+  end if;
+  if v_nombre = '' or v_apellidos = '' then
+    return jsonb_build_object('ok', false, 'error', 'nombre');
+  end if;
+  if v_email !~ '^[^@\s]+@([a-z0-9-]+\.)*tecnocampus\.cat$' then
+    return jsonb_build_object('ok', false, 'error', 'email');
+  end if;
+  if coalesce(p_pin, '') !~ '^[0-9]{4}$' then
+    return jsonb_build_object('ok', false, 'error', 'pin');
+  end if;
+
+  select id_alumno into v_existente from public.alumnos
+  where grupo_id = s.grupo_id and lower(email) = v_email;
+  if found then
+    -- El id no es secreto (el PIN sí): se le recuerda para que entre.
+    return jsonb_build_object('ok', false, 'error', 'ya_registrado', 'id_alumno', v_existente);
+  end if;
+  -- Freno a altas masivas con un código filtrado.
+  if (select count(*) from public.alumnos where grupo_id = s.grupo_id) >= 150 then
+    return jsonb_build_object('ok', false, 'error', 'grupo_lleno');
+  end if;
+
+  loop
+    v_id := lpad((floor(random() * 900000) + 100000)::integer::text, 6, '0');
+    exit when not exists (select 1 from public.alumnos where id_alumno = v_id);
+  end loop;
+
+  insert into public.alumnos (grupo_id, id_alumno, nombre, apellidos, email, pin_hash)
+  values (s.grupo_id, v_id, v_nombre, v_apellidos, v_email,
+          extensions.crypt(p_pin, extensions.gen_salt('bf', 8)));
+
+  return public.unirse_sesion(p_codigo, v_id, p_pin) || jsonb_build_object('nuevo_id', v_id);
 end;
 $$;
 
@@ -1117,6 +1176,7 @@ revoke execute on all functions in schema public from public, anon, authenticate
 
 grant execute on function public.hora_servidor()                                    to anon, authenticated;
 grant execute on function public.unirse_sesion(text, text, text)                    to anon, authenticated;
+grant execute on function public.registrar_alumno(text, text, text, text, text)     to anon, authenticated;
 grant execute on function public.estado_sesion(text)                                to anon, authenticated;
 grant execute on function public.enviar_respuesta(text, smallint, smallint, timestamptz) to anon, authenticated;
 grant execute on function public.mi_resultado(text)                                 to anon, authenticated;
