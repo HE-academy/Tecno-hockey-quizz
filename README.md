@@ -51,6 +51,17 @@ Los alumnos responden desde el móvil con tiempo por pregunta. Cada sesión da u
    select id, email from auth.users where email = 'TU_EMAIL@tecnocampus.cat';
    ```
 
+### Proyecto actual
+
+- Supabase: `mrogihueonnacjdywxys` (org Tecnocampus, eu-west-1). `schema.sql` aplicado, registro público desactivado, URL del sitio = GitHub Pages.
+- `js/config.js`: URL y clave **publicable** (puede ir en el repo). La clave secret/service_role nunca va al repo.
+
+### Mantener vivo el proyecto gratuito
+
+Supabase pausa los proyectos gratuitos tras 7 días sin actividad. La Action [`keepalive.yml`](.github/workflows/keepalive.yml) hace una consulta diaria (06:17 UTC) a `hora_servidor`.
+Usa las variables del repo `SUPABASE_URL` y `SUPABASE_KEY` (Settings → Secrets and variables → Actions → Variables).
+Se puede lanzar a mano desde la pestaña Actions → *Mantener Supabase activo* → *Run workflow*.
+
 ## Tests del esquema
 
 Ejecutan `schema.sql` en Postgres en memoria (PGlite) y prueban permisos, PIN, ventanas de tiempo, respuestas tardías, idempotencia y notas.
