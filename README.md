@@ -7,12 +7,13 @@ Los alumnos responden desde el móvil con tiempo por pregunta. Cada sesión da u
 - Backend en Supabase (plan gratuito): Postgres + Auth + Realtime.
 - PWA: funciona aunque se caiga la red a mitad de cuestionario.
 
-> Estado: **fase 1 de 5** (esquema de datos y RLS). La app todavía no tiene pantallas.
+> Estado: **fase 2 de 5**. Pantalla del alumno lista; falta el panel del profesor.
+> Web: https://he-academy.github.io/Tecno-hockey-quizz/
 
 ## Fases
 
 1. Esquema de datos y RLS — `supabase/schema.sql` ✅
-2. Flujo del alumno con modo sin conexión
+2. Flujo del alumno con modo sin conexión — `index.html`, `js/alumno.js`, `sw.js` ✅
 3. Panel del profesor y proyector
 4. Importación (Moodle XML, CSV, JSON) y exportación a Moodle
 5. Pruebas de caída de red
@@ -28,6 +29,21 @@ Los alumnos responden desde el móvil con tiempo por pregunta. Cada sesión da u
   Solo motiva, no cuenta para la nota. Se ve en el proyector y en el móvil (top 10 con nombre + inicial y su propio puesto). Nunca se enseñan notas ajenas.
 - El alumno ve en el móvil su historial de notas test a test.
 - **Nota del trimestre**: media de las notas del día, con opción de descartar las N peores y de contar ausencias como 0.
+
+## Cómo entra el alumno
+
+1. Escanea el QR del proyector con la cámara del móvil (abre la web con el código puesto), o pulsa **Escanear QR** en la app, o hace una foto al QR, o escribe el código de 6 caracteres.
+2. Pone su id de alumno y su PIN de 4 cifras. Puede marcar "Recordar en este móvil".
+
+## Qué pasa si se cae la red
+
+- Al entrar, el móvil descarga todas las preguntas (sin la respuesta correcta) y el calendario, y calcula el desfase de su reloj con el del servidor.
+- En **modo calendario fijo** el móvil avanza solo de pregunta aunque no tenga red.
+- Cada respuesta se guarda primero en el móvil (IndexedDB) y se envía con reintentos. Se reenvía al reconectar, al recargar y al volver a la app.
+- Recargar, cerrar la pestaña o reiniciar el móvil no pierde nada: al abrir la app sigue donde iba (la app está guardada por el service worker).
+- La pantalla se mantiene encendida durante la sesión cuando el navegador lo permite.
+
+Al publicar cambios en la app, sube `VERSION` en `sw.js` para que los móviles se actualicen.
 
 ## Cómo funciona la seguridad
 
