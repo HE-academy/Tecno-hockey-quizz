@@ -34,8 +34,10 @@ await db.exec(`
 await db.exec(schema);
 console.log('schema.sql cargado sin errores');
 
-await db.exec(`insert into auth.users values ('${PROFE}', 'profe@tecnocampus.cat'), ('${OTRO}', 'intruso@x.com');
-               insert into public.profesores values ('${PROFE}', 'profe@tecnocampus.cat');`);
+await db.exec(`insert into auth.users values ('${PROFE}', 'profe@tecnocampus.cat');
+               insert into auth.users values ('${OTRO}', 'intruso@x.com');`);
+const profes = (await db.query(`select user_id from public.profesores`)).rows;
+ok(profes.length === 1 && profes[0].user_id === PROFE, 'el primer usuario creado queda como profesor; el segundo no');
 
 const comoProfe = () => db.exec(`reset role; set role authenticated; select set_config('request.jwt.claim.sub', '${PROFE}', false);`);
 const comoOtro = () => db.exec(`reset role; set role authenticated; select set_config('request.jwt.claim.sub', '${OTRO}', false);`);

@@ -179,6 +179,23 @@ as $$
   select exists (select 1 from public.profesores where user_id = (select auth.uid()));
 $$;
 
+-- El registro público está desactivado: los usuarios solo se crean desde el
+-- panel de Supabase. El primero que se crea queda como profesor; los demás
+-- hay que darlos de alta a mano en public.profesores.
+create function public._alta_primer_profesor() returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  if not exists (select 1 from public.profesores) then
+    insert into public.profesores (user_id, email) values (new.id, new.email);
+  end if;
+  return new;
+end;
+$$;
+
+create trigger alta_primer_profesor after insert on auth.users
+  for each row execute function public._alta_primer_profesor();
+
 create function public._exigir_profe() returns void
 language plpgsql stable security definer set search_path = ''
 as $$

@@ -3,6 +3,14 @@ import { rpc, aMs, medirDesfase, escucharSesion, ErrorRed, ErrorServidor } from 
 import { escanearQR, extraerCodigo } from './qr.js';
 
 const LETRAS = ['A', 'B', 'C', 'D', 'E'];
+const svg = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const ICONOS = {
+  qr: svg('<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><rect x="8" y="8" width="3" height="3"/><rect x="13" y="8" width="3" height="3"/><rect x="8" y="13" width="3" height="3"/><path d="M13 13h3v3"/>'),
+  flecha: svg('<path d="M5 12h14M13 6l6 6-6 6"/>'),
+  libro: svg('<path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5M8 7h7M8 11h5"/>'),
+  barras: svg('<path d="M4 20h16M7 16v-4M12 16V8M17 16V5"/>'),
+  diana: svg('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r=".5"/><path d="M20 4l-6 6M17 4h3v3"/>'),
+};
 const LS_CRED = 'thq_credenciales';
 const LS_TOKEN = 'thq_ultimo_token';
 const LS_HIST = 'thq_historial';
@@ -10,7 +18,7 @@ const LS_HIST = 'thq_historial';
 const $app = document.getElementById('app');
 const $conexion = document.getElementById('conexion');
 const $aviso = document.getElementById('aviso-red');
-const $marca = document.getElementById('marca');
+const ponerVista = (v) => { document.body.dataset.vista = v; };
 
 // Registro de la sesión en curso, persistido en IndexedDB ('sesion'):
 // { codigo, sesion, token, alumno, preguntas[turno], ventanas, respondidas,
@@ -216,6 +224,7 @@ function tick(forzar = false) {
 // ---------------------------------------------------------------- pantallas de juego
 
 function pintarJuego(f, clave) {
+  ponerVista('juego');
   if (clave === 'reentrar') return pintarReentrar();
   if (f.tipo === 'espera') return pintarEspera();
   if (f.tipo === 'cuenta') return pintarCuenta();
@@ -550,7 +559,6 @@ function arrancar() {
   vista = null;
   resultadoFinal = null;
   Object.keys(feedback).forEach((k) => delete feedback[k]);
-  $marca.textContent = r.sesion.titulo;
   dejarDeEscuchar();
   dejarDeEscuchar = () => {};
   escucharSesion(r.sesion.id, () => refrescar()).then((parar) => { dejarDeEscuchar = parar; });
@@ -569,7 +577,6 @@ async function salir() {
   await kv.del('sesion');
   r = null;
   resultadoFinal = null;
-  $marca.innerHTML = 'Tecno <b>Hockey</b> Quizz';
   pintarConexion();
   pintarEntrada();
 }
@@ -578,34 +585,57 @@ async function salir() {
 
 function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
   vista = 'entrada';
+  ponerVista('portada');
   const cred = escrito || lsGet(LS_CRED) || {};
   const hayNotas = !!lsGet(LS_TOKEN);
   $app.innerHTML = `
-    <form class="pantalla" id="form-entrar" novalidate autocomplete="off">
-      <h1>Entra al <b>cuestionario</b></h1>
-      <p class="sub">Escanea el QR del proyector o escribe el código que aparece.</p>
-      <button type="button" class="btn oscuro bloque" id="btn-qr">Escanear QR</button>
-      <div class="campo">
-        <label for="codigo">Código de la sesión</label>
-        <input id="codigo" class="codigo-input" inputmode="text" maxlength="6" autocapitalize="characters"
-               spellcheck="false" value="${esc(codigo)}" placeholder="ABC234">
-      </div>
-      <div class="fila">
-        <div class="campo">
-          <label for="id-alumno">Id de alumno</label>
-          <input id="id-alumno" type="text" autocapitalize="none" spellcheck="false" value="${esc(cred.id_alumno || '')}">
+    <div class="portada">
+      <section class="hero">
+        <div class="hero-txt">
+          <p class="antetitulo">Deportes Colectivos II</p>
+          <h1 class="hero-titulo">Hockey <span>hierba</span></h1>
+          <span class="hero-raya" aria-hidden="true"></span>
+          <p class="hero-sub">Cuestionarios de apoyo a la asignatura</p>
+          <ul class="ventajas">
+            <li>${ICONOS.libro}<span>Repasa<br>conceptos</span></li>
+            <li>${ICONOS.barras}<span>Comprueba<br>tu progreso</span></li>
+            <li>${ICONOS.diana}<span>Prepárate<br>para el examen</span></li>
+          </ul>
         </div>
-        <div class="campo">
-          <label for="pin">PIN</label>
-          <input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" value="${esc(cred.pin || '')}">
+      </section>
+      <form class="tarjeta-entrar" id="form-entrar" novalidate autocomplete="off">
+        <div class="cabeza">
+          <p class="antetitulo">Entra al</p>
+          <h2>Cuestionario</h2>
+          <span class="raya" aria-hidden="true"></span>
         </div>
-      </div>
-      <label class="check"><input type="checkbox" id="recordar" ${cred.id_alumno || !hayNotas ? 'checked' : ''}>
-        Recordar mi id y PIN en este móvil</label>
-      ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
-      <button class="btn bloque" type="submit" id="btn-entrar">Entrar</button>
-      ${hayNotas ? '<button type="button" class="btn-link" id="btn-notas">Ver mis notas y clasificación</button>' : ''}
-    </form>`;
+        <p class="sub">Escanea el QR del proyector o escribe el código que aparece.</p>
+        <button type="button" class="btn oscuro bloque" id="btn-qr">${ICONOS.qr}Escanear QR</button>
+        <div class="separador">o</div>
+        <div class="campo">
+          <label for="codigo">Código de la sesión</label>
+          <input id="codigo" class="codigo-input" inputmode="text" maxlength="6" autocapitalize="characters"
+                 spellcheck="false" value="${esc(codigo)}" placeholder="ABC234">
+        </div>
+        <div class="fila">
+          <div class="campo">
+            <label for="id-alumno">Id de alumno</label>
+            <input id="id-alumno" type="text" autocapitalize="none" spellcheck="false" placeholder="Ej. 123456"
+                   value="${esc(cred.id_alumno || '')}">
+          </div>
+          <div class="campo">
+            <label for="pin">PIN</label>
+            <input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="••••"
+                   value="${esc(cred.pin || '')}">
+          </div>
+        </div>
+        <label class="check"><input type="checkbox" id="recordar" ${cred.id_alumno || !hayNotas ? 'checked' : ''}>
+          Recordar mi id y PIN en este dispositivo</label>
+        ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
+        <button class="btn bloque" type="submit" id="btn-entrar">Entrar ${ICONOS.flecha}</button>
+        ${hayNotas ? '<button type="button" class="btn-link" id="btn-notas">Ver mis notas y clasificación</button>' : ''}
+      </form>
+    </div>`;
   const $form = $app.querySelector('form');
   const $codigo = $form.querySelector('#codigo');
   const $boton = $form.querySelector('#btn-entrar');
@@ -634,6 +664,7 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
 
 async function pintarHistorial(pestana = 'notas') {
   vista = 'historial';
+  ponerVista('juego');
   clearTimeout(sondeo);
   const token = lsGet(LS_TOKEN);
   const pintar = (datos, cargando) => {
