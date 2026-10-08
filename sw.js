@@ -1,27 +1,32 @@
 // Service worker: guarda la app entera para que una recarga sin red funcione.
 // Al publicar cambios, sube VERSION: así los móviles descargan la versión nueva.
-const VERSION = 'thq-2026-10-08-4';
+const VERSION = 'thq-2026-10-08-5';
 const CACHE = `app-${VERSION}`;
 const CACHE_EXTRA = 'extra-v1';
 
 const APP = [
   './',
   './index.html',
+  './profe.html',
   './css/app.css',
+  './css/profe.css',
   './js/config.js',
   './js/db.js',
   './js/api.js',
   './js/qr.js',
   './js/alumno.js',
+  './js/profe.js',
+  './js/importar.js',
   './manifest.json',
   './icons/favicon.svg',
-  './img/portada.svg',
+  './img/hockey-banner.jpg',
   './icons/icon-192.png',
   './icons/icon-512.png',
 ];
 const CDN = [
   'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.min.js',
   'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js',
 ];
 
 self.addEventListener('install', (e) => {

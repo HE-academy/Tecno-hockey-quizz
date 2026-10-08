@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Profesor · Hockey Quiz</title>
+  <meta name="theme-color" content="#16243A">
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Carlito:wght@400;700&family=Montserrat:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/profe.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js" crossorigin="anonymous"></script>
+</head>
+<body data-vista="profe">
+  <header class="barra">
+    <span class="tc"><span class="tc-marca" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span class="tc-nombre">TecnoCampus</span></span>
+    <span class="marca"><b>Hockey</b> Quiz · Profesor</span>
+  </header>
+  <nav class="nav" id="nav" hidden>
+    <a href="#/sesiones" data-r="sesiones">Sesiones</a>
+    <a href="#/preguntas" data-r="preguntas">Preguntas</a>
+    <a href="#/grupos" data-r="grupos">Grupos y alumnos</a>
+    <a href="#/notas" data-r="notas">Notas</a>
+    <a href="#/salir" class="salir" id="btn-salir">Salir</a>
+  </nav>
+  <main id="app" class="profe"><p class="sub">Cargando…</p></main>
+  <script type="module" src="js/profe.js"></script>
+</body>
+</html>

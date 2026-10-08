@@ -602,6 +602,7 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
             <li>${ICONOS.diana}<span>Prepárate<br>para el examen</span></li>
           </ul>
         </div>
+        <a class="credito" href="https://commons.wikimedia.org/wiki/File:Field_hockey_banner.jpg" target="_blank" rel="noopener">Foto: fourthandfifteen · CC BY 2.0</a>
       </section>
       <form class="tarjeta-entrar" id="form-entrar" novalidate autocomplete="off">
         <div class="cabeza">

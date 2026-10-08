@@ -94,10 +94,15 @@ h2 { font-size: 1.3rem; margin: 0; }
   display: flex; align-items: flex-end;
   color: var(--blanco);
   background:
-    linear-gradient(180deg, rgba(14, 27, 44, .15) 0%, rgba(14, 27, 44, .55) 45%, rgba(14, 27, 44, .92) 100%),
-    url(../img/portada.svg) 70% 60% / cover no-repeat,
+    linear-gradient(180deg, rgba(14, 27, 44, .2) 0%, rgba(14, 27, 44, .6) 45%, rgba(14, 27, 44, .94) 100%),
+    url(../img/hockey-banner.jpg) 24% 50% / cover no-repeat,
     var(--marino);
 }
+.credito {
+  position: absolute; left: 12px; bottom: 6px; z-index: 1;
+  font-size: .7rem; color: rgba(255, 255, 255, .75); text-decoration: none;
+}
+.credito:hover { text-decoration: underline; }
 .hero::before {
   content: ""; position: absolute; top: -20px; right: 28px;
   width: 14px; height: 120px; background: var(--amarillo);
@@ -142,21 +147,24 @@ h2 { font-size: 1.3rem; margin: 0; }
     content: ""; position: absolute; right: 4%; bottom: -40px; width: 22px; height: 300px;
     background: var(--amarillo); opacity: .14; transform: skewX(-18deg); pointer-events: none;
   }
+  /* La foto es una franja panorámica: va como banda abajo (bola y stick a la
+     vista) y el texto arriba sobre el marino, sin ampliarla. */
   .hero {
     align-self: stretch; min-height: calc(100dvh - 56px);
-    padding: 64px 12% 48px 72px; align-items: center;
+    padding: 72px 12% 48px 72px; align-items: flex-start;
     clip-path: polygon(0 0, 100% 0, 84% 100%, 0 100%);
     background:
-      linear-gradient(90deg, rgba(14, 27, 44, .94) 0%, rgba(14, 27, 44, .7) 42%, rgba(14, 27, 44, .1) 80%),
-      url(../img/portada.svg) 80% 50% / cover no-repeat,
+      linear-gradient(180deg, var(--marino) 0%, var(--marino) 58%, rgba(22, 36, 58, .55) 70%, rgba(22, 36, 58, .1) 88%, rgba(22, 36, 58, 0) 100%),
+      url(../img/hockey-banner.jpg) 1% 100% / auto 44% no-repeat,
       var(--marino);
   }
+  .credito { left: 24px; bottom: 10px; }
   .hero::before { left: 40px; right: auto; height: 220px; width: 18px; }
-  .hero-txt { display: flex; flex-direction: column; gap: 4px; height: 100%; justify-content: center; }
-  .hero-titulo { font-size: clamp(3.4rem, 6vw, 5.4rem); margin-top: 18px; }
+  .hero-txt { display: flex; flex-direction: column; gap: 4px; position: relative; z-index: 1; }
+  .hero-titulo { font-size: clamp(3.2rem, 5.4vw, 5rem); margin-top: 18px; }
   .hero-sub { font-size: 1.3rem; }
   .ventajas {
-    display: flex; gap: 0; list-style: none; padding: 0; margin: 48px 0 0;
+    display: flex; gap: 0; list-style: none; padding: 0; margin: 36px 0 0;
   }
   .ventajas li {
     display: flex; flex-direction: column; gap: 8px; padding: 0 28px; font-size: .95rem; line-height: 1.25;
