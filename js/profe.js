@@ -258,7 +258,7 @@ async function vistaNuevaSesion() {
         </div>
         <div class="fila">
           <div class="campo"><label for="tiempo">Segundos por pregunta</label><input id="tiempo" type="number" min="5" max="300" value="20"></div>
-          <div class="campo"><label for="pausa">Pausa entre preguntas (s)</label><input id="pausa" type="number" min="0" max="120" value="5"></div>
+          <div class="campo"><label for="pausa">Pausa entre preguntas (s)</label><input id="pausa" type="number" min="0" max="120" value="8"></div>
         </div>
         <div class="campo"><label for="pen">Penalización por error</label>
           <select id="pen"><option value="0.25">−0,25 por error</option><option value="0">Sin penalización</option></select></div>
@@ -375,7 +375,8 @@ async function vistaProyector(id) {
   let s = null;
   let sp = [];
   let nombres = [];
-  const revelado = {};       // turno -> resultado de cerrar_pregunta
+  const reparto = {};        // turno -> [nA, nB, nC, nD, nE]
+  let rankingTurno = -1;
   let ranking = null;
   let clasif = null;
   let respondidas = 0;
@@ -433,11 +434,17 @@ async function vistaProyector(id) {
         respondidas = c1 ?? 0;
         participantes = c2 ?? 0;
       }
-      if ((f.tipo === 'entre' || f.tipo === 'acabada') && !s.barajar_preguntas
-          && !revelado[f.turno]?.revelada && ahora() > f.cierra + 2300) {
-        revelado[f.turno] = await q(sb.rpc('cerrar_pregunta', { p_sesion: id, p_turno: f.turno }));
-        if (revelado[f.turno].revelada) ranking = await q(sb.rpc('ranking_sesion', { p_sesion: id, p_limite: 5 }));
-        clave = null;
+      if ((f.tipo === 'entre' || f.tipo === 'acabada') && !s.barajar_preguntas) {
+        const filas = await q(sb.from('respuestas').select('opcion')
+          .eq('sesion_id', id).eq('posicion', f.turno).eq('aceptada', true).eq('anulada', false));
+        const n = [0, 0, 0, 0, 0];
+        filas.forEach((x) => { n[x.opcion] += 1; });
+        reparto[f.turno] = n;
+        // El servidor solo puntúa preguntas reveladas (cierre + 2 s): pedir el ranking después.
+        if (rankingTurno !== f.turno && ahora() > f.cierra + 2600) {
+          ranking = await q(sb.rpc('ranking_sesion', { p_sesion: id, p_limite: 5 }));
+          rankingTurno = f.turno;
+        }
       }
       if (f.tipo === 'fin' && !clasif) {
         [ranking, clasif] = await Promise.all([
@@ -470,8 +477,18 @@ async function vistaProyector(id) {
     if ($c && f.hasta) $c.textContent = Math.max(0, Math.ceil((f.hasta - ahora()) / 1000));
     const $n = capa.querySelector('[data-resp]');
     if ($n) $n.textContent = `${respondidas} de ${participantes} han respondido`;
-    // Cambio de fase por el reloj, sin esperar a la siguiente recarga de datos.
-    if (`${f.tipo}:${f.turno ?? ''}` !== clave) pintar(f);
+    // Cambio de fase (o momento de revelar) por el reloj, sin esperar a la recarga de datos.
+    if (claveDe(f) !== clave) pintar(f);
+  }
+
+  // La correcta se enseña a los 2 s del cierre: el mismo margen que tienen los
+  // móviles para que llegue una respuesta dada en el último segundo.
+  const revelar = (f) => (f.tipo === 'entre' || f.tipo === 'acabada') && !s.barajar_preguntas && ahora() >= f.cierra + 2000;
+
+  function claveDe(f) {
+    const base = `${f.tipo}:${f.turno ?? ''}`;
+    if (f.tipo !== 'entre' && f.tipo !== 'acabada') return base;
+    return `${base}:${revelar(f) ? 1 : 0}:${(reparto[f.turno] || []).join(',')}:${rankingTurno === f.turno ? 1 : 0}`;
   }
 
   function actualizarSala() {
@@ -507,7 +524,7 @@ async function vistaProyector(id) {
   }
 
   function pintar(f) {
-    const nueva = `${f.tipo}:${f.turno ?? ''}`;
+    const nueva = claveDe(f);
     if (nueva === clave) return f.tipo === 'sala' ? actualizarSala() : actualizarReloj(f);
     clave = nueva;
     let cuerpo = '';
@@ -545,7 +562,9 @@ async function vistaProyector(id) {
           ${s.modo === 'manual' ? '<button class="btn oscuro" type="button" data-cerrarya>Cerrar ya</button>' : ''}</div>`;
     } else if (f.tipo === 'entre' || f.tipo === 'acabada') {
       const q0 = sp[f.turno];
-      const rev = revelado[f.turno];
+      const rev = revelar(f)
+        ? { revelada: true, correcta: q0.correcta, explicacion: q0.explicacion, reparto: reparto[f.turno] || [0, 0, 0, 0, 0] }
+        : null;
       const siguiente = f.tipo === 'entre'
         ? (s.modo === 'manual'
           ? '<button class="btn" type="button" data-sig>Siguiente pregunta →</button>'
@@ -557,7 +576,7 @@ async function vistaProyector(id) {
           : `<p class="p-enunciado">${esc(q0.enunciado)}</p>
              <div class="${rev?.revelada ? 'p-revelado' : ''}">${opcionesHTML(q0, rev?.revelada ? rev : null)}</div>
              ${rev?.revelada && rev.explicacion ? `<p class="p-explicacion">${esc(rev.explicacion)}</p>` : ''}
-             ${rev?.revelada && ranking?.length ? `<h2>Top 5</h2>${rankingHTML(ranking)}` : ''}`}
+             ${rev?.revelada && rankingTurno === f.turno && ranking?.length ? `<h2>Top 5</h2>${rankingHTML(ranking)}` : ''}`}
         <div class="p-pie">${siguiente}</div>`;
     } else if (f.tipo === 'fin') {
       cuerpo = `<div class="rejilla dos">
