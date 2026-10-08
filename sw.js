@@ -1,6 +1,6 @@
 // Service worker: guarda la app entera para que una recarga sin red funcione.
 // Al publicar cambios, sube VERSION: así los móviles descargan la versión nueva.
-const VERSION = 'thq-2026-10-08-7';
+const VERSION = 'thq-2026-10-08-8';
 const CACHE = `app-${VERSION}`;
 const CACHE_EXTRA = 'extra-v1';
 

@@ -154,7 +154,10 @@ document.getElementById('btn-salir').onclick = async (e) => {
   vistaLogin();
 };
 
-function enrutar() {
+// Mientras carga la vista nueva, la anterior queda bloqueada: así nadie pulsa
+// "Borrar" en el grupo que se estaba dejando.
+let rutaEnCurso = 0;
+async function enrutar() {
   limpiarVista();
   limpiarVista = () => {};
   const [ruta, ...args] = location.hash.replace(/^#\/?/, '').split('/');
@@ -164,7 +167,16 @@ function enrutar() {
     grupos: vistaGrupos, notas: vistaNotas, proyector: vistaProyector,
   };
   window.scrollTo(0, 0);
-  (vistas[ruta] || vistaSesiones)(...args);
+  const yo = ++rutaEnCurso;
+  $app.setAttribute('aria-busy', 'true');
+  try {
+    await (vistas[ruta] || vistaSesiones)(...args);
+  } catch (e) {
+    console.error(e);
+    toast(e.message || 'No se ha podido cargar', 'error');
+  } finally {
+    if (yo === rutaEnCurso) $app.removeAttribute('aria-busy');
+  }
 }
 
 // ---------------------------------------------------------------- sesiones
