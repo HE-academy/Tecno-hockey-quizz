@@ -7,16 +7,26 @@ Los alumnos responden desde el móvil con tiempo por pregunta. Cada sesión da u
 - Backend en Supabase (plan gratuito): Postgres + Auth + Realtime.
 - PWA: funciona aunque se caiga la red a mitad de cuestionario.
 
-> Estado: **fase 2 de 5**. Pantalla del alumno lista; falta el panel del profesor.
-> Web: https://he-academy.github.io/Tecno-hockey-quizz/
+- Alumnos: https://he-academy.github.io/Tecno-hockey-quizz/
+- Profesor: https://he-academy.github.io/Tecno-hockey-quizz/profe.html
+
+## Uso en clase
+
+1. **Preguntas** → Importar tu banco (Moodle XML, CSV `enunciado;A;B;C;D;E;correcta;explicacion;etiquetas` o JSON). Siempre 5 opciones. Ejemplo: `preguntas_ejemplo.csv`.
+2. **Sesiones → Nueva sesión**: grupo, modo (calendario fijo en pista / manual), tiempo y pausa, preguntas a mano o N al azar de una etiqueta → *Guardar y lanzar*.
+3. **Proyector**: QR + código. Los alumnos entran (la primera vez se registran: nombre, apellidos, email de TecnoCampus y PIN; reciben un id de 6 cifras para siempre). Pulsa *Empezar*.
+4. Al acabar, *Terminar y guardar notas*: ranking del día y clasificación del grupo.
+5. **Notas**: por sesión (revisar respuestas sincronizadas tarde), trimestre (descartar peores, ausencias como 0) → *Exportar CSV para Moodle*.
+
+Profesores: el primer usuario de Supabase Auth y los emails de `profesores_invitados` quedan como profesor al crearse.
 
 ## Fases
 
 1. Esquema de datos y RLS — `supabase/schema.sql` ✅
 2. Flujo del alumno con modo sin conexión — `index.html`, `js/alumno.js`, `sw.js` ✅
-3. Panel del profesor y proyector
-4. Importación (Moodle XML, CSV, JSON) y exportación a Moodle
-5. Pruebas de caída de red
+3. Panel del profesor y proyector — `profe.html`, `js/profe.js` ✅
+4. Importación (Moodle XML, CSV, JSON) y exportación a Moodle — `js/importar.js` ✅
+5. Pruebas de caída de red ✅ (modo avión, recarga sin red, reenvío al reconectar; pruebas E2E fuera del repo)
 
 ## Notas y clasificación
 
