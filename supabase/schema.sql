@@ -182,11 +182,19 @@ $$;
 -- El registro público está desactivado: los usuarios solo se crean desde el
 -- panel de Supabase. El primero que se crea queda como profesor; los demás
 -- hay que darlos de alta a mano en public.profesores.
+-- Emails que pasan a ser profesor en cuanto se crea su usuario. Se rellena a
+-- mano en el SQL Editor (nadie más puede leerla ni escribirla).
+create table public.profesores_invitados (
+  email text primary key check (email = lower(email))
+);
+alter table public.profesores_invitados enable row level security;
+
 create function public._alta_primer_profesor() returns trigger
 language plpgsql security definer set search_path = ''
 as $$
 begin
-  if not exists (select 1 from public.profesores) then
+  if not exists (select 1 from public.profesores)
+     or exists (select 1 from public.profesores_invitados where email = lower(new.email)) then
     insert into public.profesores (user_id, email) values (new.id, new.email);
   end if;
   return new;

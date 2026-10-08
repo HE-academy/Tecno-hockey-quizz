@@ -38,6 +38,11 @@ await db.exec(`insert into auth.users values ('${PROFE}', 'profe@tecnocampus.cat
                insert into auth.users values ('${OTRO}', 'intruso@x.com');`);
 const profes = (await db.query(`select user_id from public.profesores`)).rows;
 ok(profes.length === 1 && profes[0].user_id === PROFE, 'el primer usuario creado queda como profesor; el segundo no');
+await db.exec(`insert into public.profesores_invitados values ('invitada@tecnocampus.cat');
+               insert into auth.users values ('33333333-3333-3333-3333-333333333333', 'Invitada@tecnocampus.cat');`);
+ok((await db.query(`select 1 from public.profesores where email = 'Invitada@tecnocampus.cat'`)).rows.length === 1,
+  'un email invitado queda como profesor al crear su usuario');
+await db.exec(`delete from public.profesores where email = 'Invitada@tecnocampus.cat'`);
 
 const comoProfe = () => db.exec(`reset role; set role authenticated; select set_config('request.jwt.claim.sub', '${PROFE}', false);`);
 const comoOtro = () => db.exec(`reset role; set role authenticated; select set_config('request.jwt.claim.sub', '${OTRO}', false);`);
