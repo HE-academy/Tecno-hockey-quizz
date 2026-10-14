@@ -486,9 +486,19 @@ begin
     return jsonb_build_object('ok', false, 'error', 'bloqueado', 'hasta', a.bloqueado_hasta);
   end if;
 
-  if coalesce(p_pin, '') !~ '^[0-9]{4}$'
-     or a.pin_hash is null
-     or a.pin_hash <> extensions.crypt(p_pin, a.pin_hash) then
+  -- Importado por el profesor y aún sin PIN: lo elige al entrar (elegir_pin).
+  -- Nombre + inicial para que confirme que es él antes de quedarse la cuenta.
+  if a.pin_hash is null then
+    return jsonb_build_object('ok', false, 'error', 'sin_pin',
+      'nombre', a.nombre || case when a.apellidos <> '' then ' ' || left(a.apellidos, 1) || '.' else '' end);
+  end if;
+
+  -- Un PIN mal formado (vacío) no es un intento: no cuenta para el bloqueo.
+  if coalesce(p_pin, '') !~ '^[0-9]{4}$' then
+    return jsonb_build_object('ok', false, 'error', 'credenciales');
+  end if;
+
+  if a.pin_hash <> extensions.crypt(p_pin, a.pin_hash) then
     -- 5 fallos seguidos bloquean 5 minutos (10.000 PIN posibles).
     update public.alumnos
        set intentos_fallidos = case when intentos_fallidos + 1 >= 5 then 0 else intentos_fallidos + 1 end,
@@ -556,7 +566,7 @@ declare
   v_apellidos text := left(regexp_replace(trim(coalesce(p_apellidos, '')), '\s+', ' ', 'g'), 80);
   v_email text := lower(trim(coalesce(p_email, '')));
   v_id text;
-  v_existente text;
+  v_existente public.alumnos%rowtype;
 begin
   select * into s from public.sesiones
   where codigo = upper(trim(p_codigo)) and estado in ('abierta', 'en_curso');
@@ -573,11 +583,17 @@ begin
     return jsonb_build_object('ok', false, 'error', 'pin');
   end if;
 
-  select id_alumno into v_existente from public.alumnos
+  select * into v_existente from public.alumnos
   where grupo_id = s.grupo_id and lower(email) = v_email;
   if found then
+    -- Importado por el profesor y sin PIN: se queda con el que elige ahora
+    -- (nombre y apellidos, los de la lista del profesor).
+    if v_existente.pin_hash is null then
+      return public.elegir_pin(p_codigo, v_existente.id_alumno, p_pin)
+             || jsonb_build_object('nuevo_id', v_existente.id_alumno);
+    end if;
     -- El id no es secreto (el PIN sí): se le recuerda para que entre.
-    return jsonb_build_object('ok', false, 'error', 'ya_registrado', 'id_alumno', v_existente);
+    return jsonb_build_object('ok', false, 'error', 'ya_registrado', 'id_alumno', v_existente.id_alumno);
   end if;
   -- Freno a altas masivas con un código filtrado.
   if (select count(*) from public.alumnos where grupo_id = s.grupo_id) >= 150 then
@@ -594,6 +610,46 @@ begin
           extensions.crypt(p_pin, extensions.gen_salt('bf', 8)));
 
   return public.unirse_sesion(p_codigo, v_id, p_pin) || jsonb_build_object('nuevo_id', v_id);
+end;
+$$;
+
+-- Primer acceso de un alumno importado por el profesor: elige su PIN y entra.
+-- Solo con el código de una sesión abierta (en clase) y solo si aún no tiene
+-- PIN; si alguien se lo quedó por error, el profesor lo quita (quitar_pin).
+create function public.elegir_pin(p_codigo text, p_id_alumno text, p_pin text)
+returns jsonb
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  s public.sesiones%rowtype;
+  a public.alumnos%rowtype;
+begin
+  select * into s from public.sesiones
+  where codigo = upper(trim(p_codigo)) and estado in ('abierta', 'en_curso');
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'codigo');
+  end if;
+  if coalesce(p_pin, '') !~ '^[0-9]{4}$' then
+    return jsonb_build_object('ok', false, 'error', 'pin');
+  end if;
+
+  select * into a from public.alumnos
+  where grupo_id = s.grupo_id
+    and (id_alumno = trim(p_id_alumno) or lower(email) = lower(trim(p_id_alumno)))
+  for update;
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'credenciales');
+  end if;
+  if a.pin_hash is not null then
+    return jsonb_build_object('ok', false, 'error', 'ya_tiene_pin');
+  end if;
+
+  update public.alumnos
+     set pin_hash = extensions.crypt(p_pin, extensions.gen_salt('bf', 8)),
+         intentos_fallidos = 0, bloqueado_hasta = null
+   where id = a.id;
+
+  return public.unirse_sesion(p_codigo, a.id_alumno, p_pin);
 end;
 $$;
 
@@ -838,6 +894,22 @@ begin
     raise exception 'alumno_inexistente';
   end if;
   return v_pin;
+end;
+$$;
+
+-- El alumno vuelve a elegir PIN la próxima vez que entre (lo olvidó, o se lo
+-- quedó otro).
+create function public.quitar_pin(p_alumno uuid) returns void
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  perform public._exigir_profe();
+  update public.alumnos
+     set pin_hash = null, intentos_fallidos = 0, bloqueado_hasta = null
+   where id = p_alumno;
+  if not found then
+    raise exception 'alumno_inexistente';
+  end if;
 end;
 $$;
 
@@ -1177,6 +1249,7 @@ revoke execute on all functions in schema public from public, anon, authenticate
 grant execute on function public.hora_servidor()                                    to anon, authenticated;
 grant execute on function public.unirse_sesion(text, text, text)                    to anon, authenticated;
 grant execute on function public.registrar_alumno(text, text, text, text, text)     to anon, authenticated;
+grant execute on function public.elegir_pin(text, text, text)                       to anon, authenticated;
 grant execute on function public.estado_sesion(text)                                to anon, authenticated;
 grant execute on function public.enviar_respuesta(text, smallint, smallint, timestamptz) to anon, authenticated;
 grant execute on function public.mi_resultado(text)                                 to anon, authenticated;
@@ -1186,6 +1259,7 @@ grant execute on function public.mi_clasificacion(text, integer)                
 grant execute on function public.es_profe()                                         to authenticated;
 grant execute on function public.generar_pines(uuid, boolean)                       to authenticated;
 grant execute on function public.generar_pin(uuid)                                  to authenticated;
+grant execute on function public.quitar_pin(uuid)                                   to authenticated;
 grant execute on function public.asignar_preguntas(uuid, uuid[])                    to authenticated;
 grant execute on function public.lanzar_sesion(uuid)                                to authenticated;
 grant execute on function public.iniciar_sesion(uuid, integer)                      to authenticated;

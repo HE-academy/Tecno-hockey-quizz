@@ -836,17 +836,19 @@ async function vistaGrupos(grupoId) {
         <button class="btn peque secundario" type="button" id="renombrar-grupo">Renombrar</button>
         <button class="btn peque secundario" type="button" id="borrar-grupo">Borrar grupo</button>
       </div>
-      <p class="ayuda">Los alumnos se registran solos la primera vez que entran con el código de una sesión de este grupo
-        (nombre, apellidos, email de TecnoCampus y un PIN que eligen). Si alguien olvida el PIN, pulsa "Nuevo PIN" y dáselo.
-        Importar un CSV (<code>id_alumno, nombre, apellidos, email</code>, o la lista de participantes de Moodle) es opcional.</p>
+      <p class="ayuda">Importa la lista (<code>id_alumno, nombre, apellidos, email</code>, o los participantes de Moodle): la primera vez,
+        cada alumno entra con su email y el código de la sesión y elige su PIN. Quien no esté en la lista puede registrarse solo.
+        Si alguien olvida el PIN o dice que otro le ha cogido la cuenta, pulsa "Quitar PIN" y lo vuelve a elegir al entrar.
+        "Generar PIN" sirve si prefieres repartirlos tú.</p>
       <div id="zona-pines"></div>
       <div id="zona-import"></div>
       <div class="tabla-envoltorio scroll" style="margin-top:12px"><table class="tabla">
         <thead><tr><th>Id</th><th>Apellidos, nombre</th><th>Email</th><th>PIN</th><th></th></tr></thead>
         <tbody>${alumnos.map((a) => `
           <tr><td>${esc(a.id_alumno)}</td><td>${esc(a.apellidos)}${a.apellidos ? ', ' : ''}${esc(a.nombre)}</td><td>${esc(a.email)}</td>
-            <td>${a.pin_hash ? '✓' : '<span class="chip amarillo">sin PIN</span>'}</td>
-            <td><div class="acciones"><button class="btn peque secundario" data-pin="${a.id}">Nuevo PIN</button>
+            <td>${a.pin_hash ? '✓' : '<span class="chip amarillo" title="Lo elegirá al entrar">pendiente</span>'}</td>
+            <td><div class="acciones">${a.pin_hash ? `<button class="btn peque secundario" data-quitar-pin="${a.id}">Quitar PIN</button>` : ''}
+              <button class="btn peque secundario" data-pin="${a.id}">Generar PIN</button>
               <button class="btn peque secundario" data-borrar="${a.id}" title="Borrar">✕</button></div></td></tr>`).join('')
           || '<tr><td colspan="5">Sin alumnos. Importa un CSV.</td></tr>'}</tbody></table></div>
     </div>` : '<div class="caja">Crea un grupo por clase.</div>'}`;
@@ -898,6 +900,17 @@ async function vistaGrupos(grupoId) {
       mostrarPines([{ ...a, pin }]);
     }, b);
   });
+  $app.querySelectorAll('[data-quitar-pin]').forEach((b) => {
+    b.onclick = () => {
+      const a = alumnos.find((x) => x.id === b.dataset.quitarPin);
+      if (!confirm(`¿Quitar el PIN de ${a.nombre} ${a.apellidos}? Lo elegirá de nuevo la próxima vez que entre.`)) return;
+      intentar(async () => {
+        await q(sb.rpc('quitar_pin', { p_alumno: a.id }));
+        toast('PIN quitado');
+        vistaGrupos(actual);
+      }, b);
+    };
+  });
   $app.querySelectorAll('[data-borrar]').forEach((b) => {
     b.onclick = () => {
       if (!confirm('¿Borrar este alumno? Se borran también sus respuestas y notas.')) return;
@@ -930,6 +943,12 @@ async function vistaGrupos(grupoId) {
     if (!archivo) return;
     const filas = leerCSVAlumnos(await leerArchivo(archivo));
     const existentes = new Set(alumnos.map((a) => a.id_alumno));
+    // El email no se repite en un grupo: quien ya se registró solo con otro id se queda como está.
+    const idPorEmail = new Map(alumnos.map((a) => [a.email.toLowerCase(), a.id_alumno]));
+    for (const f of filas) {
+      const otro = idPorEmail.get(f.alumno.email);
+      if (otro && otro !== f.alumno.id_alumno) f.errores.push(`ya registrado con el id ${otro}`);
+    }
     const validas = filas.filter((f) => !f.errores.length);
     const $z = $app.querySelector('#zona-import');
     $z.innerHTML = `
@@ -947,7 +966,7 @@ async function vistaGrupos(grupoId) {
     $z.querySelector('#imp-al').onclick = (ev) => intentar(async () => {
       const unicos = [...new Map(validas.map((f) => [f.alumno.id_alumno, { ...f.alumno, grupo_id: actual }])).values()];
       await q(sb.from('alumnos').upsert(unicos, { onConflict: 'grupo_id,id_alumno' }));
-      toast(`${unicos.length} alumnos importados. Ahora genera sus PIN.`);
+      toast(`${unicos.length} alumnos importados. Elegirán su PIN la primera vez que entren.`);
       vistaGrupos(actual);
     }, ev.target);
   };

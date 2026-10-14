@@ -476,7 +476,7 @@ function pintarReentrar() {
     const err = await entrar(r.codigo, r.alumno.id_alumno, $app.querySelector('#pin').value);
     if (err) {
       const $e = $app.querySelector('#error');
-      $e.textContent = err;
+      $e.textContent = err.sinPin !== undefined ? 'El profesor ha reiniciado tu PIN: sal y vuelve a entrar para elegir uno.' : err;
       $e.hidden = false;
     }
   };
@@ -495,14 +495,15 @@ function barajar(n) {
   return a;
 }
 
-// Devuelve null si entra, o el mensaje de error.
+// Devuelve null si entra, el mensaje de error, o { sinPin } si el profesor lo
+// dio de alta y aún tiene que elegir PIN. El PIN puede ir vacío para eso.
 async function entrar(codigo, idAlumno, pin, recordar) {
   codigo = (codigo || '').trim().toUpperCase();
   idAlumno = (idAlumno || '').trim();
   pin = (pin || '').trim();
   if (!/^[A-Z2-9]{6}$/.test(codigo)) return 'El código tiene 6 caracteres (letras y números).';
-  if (!idAlumno) return 'Escribe tu id de alumno.';
-  if (!/^\d{4}$/.test(pin)) return 'El PIN son 4 cifras.';
+  if (!idAlumno) return 'Escribe tu id o tu email.';
+  if (pin && !/^\d{4}$/.test(pin)) return 'El PIN son 4 cifras.';
   let res;
   let desfase = 0;
   try {
@@ -521,7 +522,33 @@ async function entrar(codigo, idAlumno, pin, recordar) {
       const hora = new Date(aMs(res.hasta)).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
       return `Demasiados intentos con PIN incorrecto. Prueba otra vez a las ${hora}.`;
     }
-    return 'Id (o email) o PIN incorrectos.';
+    if (res.error === 'sin_pin') return { sinPin: res.nombre };
+    return pin ? 'Id (o email) o PIN incorrectos.' : 'Escribe tu PIN.';
+  }
+  await dentro(res, codigo, idAlumno, pin, recordar, desfase);
+  return null;
+}
+
+// Primer acceso de un alumno dado de alta por el profesor: null si entra,
+// { error } para repetir, o { volver } para regresar a la entrada.
+async function elegirPin(codigo, idAlumno, pin, pin2, recordar) {
+  if (!/^\d{4}$/.test(pin)) return { error: 'El PIN son 4 cifras.' };
+  if (pin !== pin2) return { error: 'Los dos PIN no coinciden.' };
+  let res;
+  let desfase = 0;
+  try {
+    desfase = (await medirDesfase()).desfase;
+    res = await rpc('elegir_pin', { p_codigo: codigo, p_id_alumno: idAlumno, p_pin: pin });
+  } catch (e) {
+    marcarConexion(false);
+    return { error: e instanceof ErrorRed ? 'Sin conexión. Para elegir el PIN hace falta internet.' : 'No se ha podido guardar el PIN.' };
+  }
+  marcarConexion(true);
+  if (!res.ok) {
+    if (res.error === 'pin') return { error: 'El PIN son 4 cifras.' };
+    if (res.error === 'ya_tiene_pin') return { volver: 'Ya tienes PIN: entra con él. Si no lo elegiste tú, avisa al profesor.' };
+    if (res.error === 'codigo') return { volver: 'No hay ninguna sesión abierta con ese código.' };
+    return { volver: 'No se ha podido entrar. Revisa tu id o email.' };
   }
   await dentro(res, codigo, idAlumno, pin, recordar, desfase);
   return null;
@@ -663,6 +690,7 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
         ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
         <button class="btn bloque" type="submit" id="btn-entrar">Entrar ${ICONOS.flecha}</button>
         <button type="button" class="btn secundario bloque" id="btn-registro">¿Primera vez? Regístrate</button>
+        <p class="sub">¿El profesor ya te ha dado de alta? La primera vez escribe tu email, deja el PIN vacío y pulsa Entrar.</p>
         ${hayNotas ? '<button type="button" class="btn-link" id="btn-notas">Ver mis notas y clasificación</button>' : ''}
       </form>
     </div>`;
@@ -674,8 +702,11 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
     $boton.disabled = true;
     $boton.textContent = 'Entrando…';
     const escrito = { id_alumno: $form.querySelector('#id-alumno').value, pin: $form.querySelector('#pin').value };
-    const err = await entrar($codigo.value, escrito.id_alumno, escrito.pin, $form.querySelector('#recordar').checked);
-    if (err) pintarEntrada({ codigo: $codigo.value.toUpperCase(), error: err, escrito });
+    const recordar = $form.querySelector('#recordar').checked;
+    const err = await entrar($codigo.value, escrito.id_alumno, escrito.pin, recordar);
+    if (err?.sinPin !== undefined) {
+      pintarElegirPin({ codigo: $codigo.value.toUpperCase(), idAlumno: escrito.id_alumno.trim(), nombre: err.sinPin, recordar });
+    } else if (err) pintarEntrada({ codigo: $codigo.value.toUpperCase(), error: err, escrito });
   };
   $form.onsubmit = (e) => { e.preventDefault(); enviar(); };
   $codigo.oninput = () => { $codigo.value = $codigo.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); };
@@ -707,6 +738,45 @@ function heroHTML() {
       </div>
       <a class="credito" href="https://commons.wikimedia.org/wiki/File:Field_hockey_banner.jpg" target="_blank" rel="noopener">Foto: fourthandfifteen · CC BY 2.0</a>
     </section>`;
+}
+
+function pintarElegirPin({ codigo, idAlumno, nombre, recordar, error = '' }) {
+  vista = 'elegir-pin';
+  ponerVista('portada');
+  $app.innerHTML = `
+    <div class="portada">
+      ${heroHTML()}
+      <form class="tarjeta-entrar" id="form-elegir-pin" novalidate autocomplete="off">
+        <div class="cabeza">
+          <p class="antetitulo">Primera vez</p>
+          <h2>Elige tu PIN</h2>
+          <span class="raya" aria-hidden="true"></span>
+        </div>
+        <p class="sub">Hola, <b>${esc(nombre)}</b><br>Elige un PIN de 4 cifras: a partir de ahora entrarás con tu email y este PIN.</p>
+        <div class="fila">
+          <div class="campo"><label for="pin">Elige un PIN</label>
+            <input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="4 cifras"></div>
+          <div class="campo"><label for="pin2">Repite el PIN</label>
+            <input id="pin2" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="4 cifras"></div>
+        </div>
+        ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
+        <button class="btn bloque" type="submit" id="btn-guardar-pin">Guardar PIN y entrar ${ICONOS.flecha}</button>
+        <button type="button" class="btn-link" id="btn-volver">No soy yo · volver</button>
+      </form>
+    </div>`;
+  const $f = $app.querySelector('form');
+  $f.querySelector('#pin').focus();
+  $f.querySelector('#btn-volver').onclick = () => pintarEntrada({ codigo, escrito: { id_alumno: '', pin: '' } });
+  $f.onsubmit = async (e) => {
+    e.preventDefault();
+    const $b = $f.querySelector('#btn-guardar-pin');
+    $b.disabled = true;
+    $b.textContent = 'Guardando…';
+    const res = await elegirPin(codigo, idAlumno, $f.querySelector('#pin').value, $f.querySelector('#pin2').value, recordar);
+    if (!res) return;
+    if (res.volver) return pintarEntrada({ codigo, error: res.volver, escrito: { id_alumno: idAlumno, pin: '' } });
+    pintarElegirPin({ codigo, idAlumno, nombre, recordar, error: res.error });
+  };
 }
 
 function pintarRegistro({ codigo = '', error = '', escrito = {} } = {}) {

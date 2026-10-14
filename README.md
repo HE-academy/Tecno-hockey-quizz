@@ -43,7 +43,13 @@ Profesores: el primer usuario de Supabase Auth y los emails de `profesores_invit
 ## Cómo entra el alumno
 
 1. Escanea el QR del proyector con la cámara del móvil (abre la web con el código puesto), o pulsa **Escanear QR** en la app, o hace una foto al QR, o escribe el código de 6 caracteres.
-2. Pone su id de alumno y su PIN de 4 cifras. Puede marcar "Recordar en este móvil".
+2. Pone su id o su email y su PIN de 4 cifras. Puede marcar "Recordar en este móvil".
+
+De dónde sale el PIN:
+
+- **Importado por el profesor** (CSV o participantes de Moodle): la primera vez entra con su email y el PIN vacío, ve su nombre ("Hola, Laia S.") y elige su PIN. Solo se puede con una sesión abierta y solo si aún no tiene PIN.
+- **No está en la lista**: se registra solo (nombre, apellidos, email de TecnoCampus y PIN). Si se registra con el email de un importado sin PIN, se queda esa ficha.
+- **Lo olvida, o se lo quedó otro**: el profesor pulsa *Quitar PIN* y lo vuelve a elegir al entrar. *Generar PIN* sigue disponible para repartirlos en papel.
 
 ## Qué pasa si se cae la red
 
@@ -65,7 +71,7 @@ Al publicar cambios en la app, sube `VERSION` en `sw.js` para que los móviles s
 - PIN guardado con bcrypt. 5 intentos fallidos bloquean 5 minutos.
 - La corrección y la nota se calculan en Postgres, nunca en el móvil.
 
-## Puesta en marcha (provisional, se completará en la fase 4)
+## Puesta en marcha
 
 1. Crea un proyecto nuevo en [supabase.com](https://supabase.com) (plan gratuito).
 2. SQL Editor → pega y ejecuta `supabase/schema.sql` entero.
@@ -80,6 +86,7 @@ Al publicar cambios en la app, sube `VERSION` en `sw.js` para que los móviles s
 ### Proyecto actual
 
 - Supabase: `mrogihueonnacjdywxys` (org Tecnocampus, eu-west-1). `schema.sql` aplicado, registro público desactivado, URL del sitio = GitHub Pages.
+- Cambios posteriores al esquema: `supabase/migraciones/`, en orden de fecha. Un proyecto nuevo solo necesita `schema.sql` (ya los incluye).
 - `js/config.js`: URL y clave **publicable** (puede ir en el repo). La clave secret/service_role nunca va al repo.
 
 ### Mantener vivo el proyecto gratuito
