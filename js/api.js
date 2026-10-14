@@ -2,6 +2,11 @@ import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
 export const SUPABASE_JS = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.min.js';
 
+// Archivos de las preguntas (bucket público "medios"). El nombre es el sha256
+// del contenido: nunca cambia, así que se guardan para siempre en el móvil.
+export const CACHE_MEDIOS = 'medios-v1';
+export const urlMedio = (nombre) => `${SUPABASE_URL}/storage/v1/object/public/medios/${nombre}`;
+
 // Fallo de red, timeout o 5xx: se puede reintentar.
 export class ErrorRed extends Error {}
 // El servidor respondió y dijo que no (token_invalido, permisos...): no reintentar igual.

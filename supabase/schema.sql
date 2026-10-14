@@ -60,12 +60,20 @@ create table public.preguntas (
   explicacion     text not null default '',
   etiquetas       text[] not null default '{}',
   dificultad      smallint check (dificultad between 1 and 5),
+  -- Medios: archivo del bucket "medios" (nombre = sha256 del contenido, así
+  -- no se guarda dos veces) o "yt:ID" de YouTube. El vídeo solo se ve en el
+  -- proyector justo antes de abrir la respuesta; video_s es lo que dura.
+  imagen          text check (imagen ~ '^[0-9a-f]{64}\.(webp|jpg|png)$'),
+  video           text check (video ~ '^([0-9a-f]{64}\.(mp4|webm)|yt:[A-Za-z0-9_-]{11})$'),
+  video_desde_s   integer not null default 0 check (video_desde_s >= 0),
+  video_s         smallint check (video_s between 1 and 180),
   clave_duplicado text generated always as (lower(regexp_replace(trim(enunciado), '\s+', ' ', 'g'))) stored,
   creada_en       timestamptz not null default now(),
   actualizada_en  timestamptz not null default now(),
   check (array_ndims(opciones) = 1 and array_length(opciones, 1) = 5),
   check (array_position(opciones, null) is null),
-  check (correcta between 0 and 4)
+  check (correcta between 0 and 4),
+  constraint preguntas_video_s check ((video is null) = (video_s is null))
 );
 create index preguntas_etiquetas_idx on public.preguntas using gin (etiquetas);
 create index preguntas_duplicado_idx on public.preguntas (clave_duplicado);
@@ -103,6 +111,10 @@ create table public.sesion_preguntas (
   opciones    text[] not null,
   correcta    smallint not null,
   explicacion text not null default '',
+  imagen        text,
+  video         text,
+  video_desde_s integer not null default 0,
+  video_s       smallint,
   abierta_en  timestamptz,
   cierra_en   timestamptz,
   primary key (sesion_id, posicion),
@@ -540,7 +552,8 @@ begin
     'preguntas', (
       select jsonb_agg(jsonb_build_object(
                'turno', t.n - 1, 'posicion', sp.posicion,
-               'enunciado', sp.enunciado, 'opciones', sp.opciones)
+               'enunciado', sp.enunciado, 'opciones', sp.opciones,
+               'imagen', sp.imagen, 'video_s', sp.video_s)
                order by t.n)
       from unnest(p.orden) with ordinality as t (posicion, n)
       join public.sesion_preguntas sp on sp.sesion_id = s.id and sp.posicion = t.posicion),
@@ -926,8 +939,10 @@ begin
   end if;
   delete from public.sesion_preguntas where sesion_id = p_sesion;
   insert into public.sesion_preguntas
-    (sesion_id, posicion, pregunta_id, enunciado, opciones, correcta, explicacion)
-  select p_sesion, (t.n - 1)::smallint, q.id, q.enunciado, q.opciones, q.correcta, q.explicacion
+    (sesion_id, posicion, pregunta_id, enunciado, opciones, correcta, explicacion,
+     imagen, video, video_desde_s, video_s)
+  select p_sesion, (t.n - 1)::smallint, q.id, q.enunciado, q.opciones, q.correcta, q.explicacion,
+         q.imagen, q.video, q.video_desde_s, q.video_s
   from unnest(p_preguntas) with ordinality as t (id, n)
   join public.preguntas q on q.id = t.id;
   get diagnostics v_n = row_count;
@@ -954,6 +969,11 @@ begin
   end if;
   if not exists (select 1 from public.sesion_preguntas where sesion_id = p_sesion) then
     raise exception 'sesion_sin_preguntas';
+  end if;
+  -- El vídeo se ve en el proyector: todos tienen que estar en la misma pregunta.
+  if exists (select 1 from public.sesiones where id = p_sesion and barajar_preguntas)
+     and exists (select 1 from public.sesion_preguntas where sesion_id = p_sesion and video is not null) then
+    raise exception 'video_con_barajar';
   end if;
   loop
     b := extensions.gen_random_bytes(6);
@@ -987,14 +1007,18 @@ begin
     raise exception 'sesion_no_abierta';
   end if;
   update public.sesiones set estado = 'en_curso', inicio = v_inicio where id = p_sesion;
+  -- Cada vídeo se ve justo antes de su pregunta: retrasa esa ventana y las siguientes.
   if s.modo = 'fijo' then
-    update public.sesion_preguntas
-       set abierta_en = v_inicio + make_interval(secs => posicion * (s.tiempo_s + s.pausa_s)),
-           cierra_en  = v_inicio + make_interval(secs => posicion * (s.tiempo_s + s.pausa_s) + s.tiempo_s)
-     where sesion_id = p_sesion;
+    update public.sesion_preguntas sp
+       set abierta_en = v_inicio + make_interval(secs => sp.posicion * (s.tiempo_s + s.pausa_s) + x.video_acum),
+           cierra_en  = v_inicio + make_interval(secs => sp.posicion * (s.tiempo_s + s.pausa_s) + x.video_acum + s.tiempo_s)
+      from (select posicion, sum(coalesce(video_s, 0)) over (order by posicion) as video_acum
+              from public.sesion_preguntas where sesion_id = p_sesion) x
+     where sp.sesion_id = p_sesion and sp.posicion = x.posicion;
   else
     update public.sesion_preguntas
-       set abierta_en = v_inicio, cierra_en = v_inicio + make_interval(secs => s.tiempo_s)
+       set abierta_en = v_inicio + make_interval(secs => coalesce(video_s, 0)),
+           cierra_en  = v_inicio + make_interval(secs => coalesce(video_s, 0) + s.tiempo_s)
      where sesion_id = p_sesion and posicion = 0;
   end if;
   perform public._publicar_vivo(p_sesion);
@@ -1021,7 +1045,8 @@ begin
   update public.sesion_preguntas set cierra_en = now()
    where sesion_id = p_sesion and cierra_en > now();
   update public.sesion_preguntas
-     set abierta_en = now(), cierra_en = now() + make_interval(secs => s.tiempo_s)
+     set abierta_en = now() + make_interval(secs => coalesce(video_s, 0)),
+         cierra_en  = now() + make_interval(secs => coalesce(video_s, 0) + s.tiempo_s)
    where sesion_id = p_sesion and posicion = p_turno;
   perform public._publicar_vivo(p_sesion);
   return jsonb_build_object('turno', p_turno, 'ventanas', public._ventanas(p_sesion));
@@ -1190,6 +1215,55 @@ begin
 end;
 $$;
 
+-- Archivos del bucket "medios" con su tamaño y si alguna pregunta o sesión los
+-- usa. Los que no, se borran desde el panel con la API de Storage (no por SQL).
+create function public.medios_uso()
+returns table (nombre text, bytes bigint, en_uso boolean)
+language plpgsql stable security definer set search_path = ''
+as $$
+begin
+  perform public._exigir_profe();
+  if to_regclass('storage.objects') is null then
+    return;
+  end if;
+  return query
+  select o.name, coalesce((o.metadata ->> 'size')::bigint, 0),
+         exists (select 1 from public.preguntas q where o.name in (q.imagen, q.video))
+         or exists (select 1 from public.sesion_preguntas sp where o.name in (sp.imagen, sp.video))
+  from storage.objects o
+  where o.bucket_id = 'medios';
+end;
+$$;
+
+-- ---------------------------------------------------------------------
+-- Storage: bucket público "medios" (imágenes y clips de las preguntas)
+-- ---------------------------------------------------------------------
+-- Lectura pública por URL (los nombres son sha256: no se adivinan) para que
+-- los móviles no necesiten cuenta. Solo el profesor sube, lista y borra.
+-- 20 MB por archivo: el plan gratuito da 1 GB en total.
+do $$
+begin
+  if to_regclass('storage.objects') is null then
+    return;  -- Postgres sin Supabase Storage (tests)
+  end if;
+  insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+  values ('medios', 'medios', true, 20971520,
+          array['image/webp', 'image/jpeg', 'image/png', 'video/mp4', 'video/webm'])
+  on conflict (id) do update
+    set public = excluded.public, file_size_limit = excluded.file_size_limit,
+        allowed_mime_types = excluded.allowed_mime_types;
+  drop policy if exists medios_profe_lee on storage.objects;
+  drop policy if exists medios_profe_sube on storage.objects;
+  drop policy if exists medios_profe_borra on storage.objects;
+  create policy medios_profe_lee on storage.objects for select to authenticated
+    using (bucket_id = 'medios' and (select public.es_profe()));
+  create policy medios_profe_sube on storage.objects for insert to authenticated
+    with check (bucket_id = 'medios' and (select public.es_profe()));
+  create policy medios_profe_borra on storage.objects for delete to authenticated
+    using (bucket_id = 'medios' and (select public.es_profe()));
+end;
+$$;
+
 -- ---------------------------------------------------------------------
 -- Row Level Security
 -- ---------------------------------------------------------------------
@@ -1270,6 +1344,7 @@ grant execute on function public.notas_sesion(uuid)                             
 grant execute on function public.notas_trimestre(uuid, date, date, integer, boolean) to authenticated;
 grant execute on function public.ranking_sesion(uuid, integer)                      to authenticated;
 grant execute on function public.clasificacion_grupo(uuid, date, date)              to authenticated;
+grant execute on function public.medios_uso()                                       to authenticated;
 
 -- ---------------------------------------------------------------------
 -- Realtime: alumnos escuchan sesiones_vivo; el proyector, respuestas (RLS profe)

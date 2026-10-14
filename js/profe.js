@@ -1,5 +1,5 @@
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
-import { medirDesfase, aMs } from './api.js';
+import { medirDesfase, aMs, urlMedio } from './api.js';
 import {
   leerPreguntas, validarPregunta, claveDuplicado, leerCSVAlumnos, generarCSV, descargar,
 } from './importar.js';
@@ -38,6 +38,7 @@ function traducirError(m) {
     sesion_no_abierta: 'La sesión no está en la sala de espera.',
     turno_no_disponible: 'Esa pregunta ya se abrió.',
     preguntas_inexistentes_o_repetidas: 'Alguna pregunta no existe o está repetida.',
+    video_con_barajar: 'Hay preguntas con vídeo: no se puede barajar el orden de las preguntas.',
   };
   return Object.entries(mapa).find(([k]) => m.includes(k))?.[1] || m;
 }
@@ -233,6 +234,7 @@ async function vistaSesiones(grupoFiltro = '') {
       if (!confirm(`¿Borrar la sesión "${s.titulo}"?${aviso}`)) return;
       intentar(async () => {
         await q(sb.from('sesiones').delete().eq('id', s.id));
+        await limpiarMedios().catch(() => {});
         toast('Sesión borrada');
         vistaSesiones(grupoFiltro);
       }, b);
@@ -243,7 +245,7 @@ async function vistaSesiones(grupoFiltro = '') {
 async function vistaNuevaSesion() {
   const [grupos, preguntas] = await Promise.all([
     cargarGrupos(),
-    todas(() => sb.from('preguntas').select('id, enunciado, etiquetas, opciones, correcta').order('creada_en', { ascending: false })),
+    todas(() => sb.from('preguntas').select('id, enunciado, etiquetas, opciones, correcta, imagen, video, video_s').order('creada_en', { ascending: false })),
   ]);
   if (!grupos.length) {
     $app.innerHTML = '<div class="caja">Antes crea un grupo en <a href="#/grupos">Grupos y alumnos</a>.</div>';
@@ -276,7 +278,8 @@ async function vistaNuevaSesion() {
           <select id="pen"><option value="0.25">−0,25 por error</option><option value="0">Sin penalización</option></select></div>
         <label class="check"><input type="checkbox" id="bar-preg"> Barajar el orden de las preguntas por alumno (solo calendario fijo)</label>
         <label class="check"><input type="checkbox" id="bar-op" checked> Barajar el orden de las opciones por alumno</label>
-        <p class="ayuda">Con preguntas barajadas el proyector no puede enseñar la pregunta en curso ni la correcta hasta el final.</p>
+        <p class="ayuda">Con preguntas barajadas el proyector no puede enseñar la pregunta en curso ni la correcta hasta el final,
+          y no se pueden usar preguntas con vídeo (el vídeo se ve en el proyector, todos a la vez).</p>
       </div>
       <div class="caja pantalla">
         <h2>Preguntas <span class="chip" id="cuenta">0</span></h2>
@@ -306,7 +309,7 @@ async function vistaNuevaSesion() {
   const $sel = $f.querySelector('#seleccion');
   const pintarSeleccion = () => {
     $f.querySelector('#cuenta').textContent = elegidas.length;
-    $sel.innerHTML = elegidas.map((id, i) => `<li>${esc(porId.get(id).enunciado)} <button type="button" data-quitar="${i}" title="Quitar">✕</button></li>`).join('');
+    $sel.innerHTML = elegidas.map((id, i) => `<li>${esc(porId.get(id).enunciado)} ${chipsMedios(porId.get(id))} <button type="button" data-quitar="${i}" title="Quitar">✕</button></li>`).join('');
     $sel.querySelectorAll('[data-quitar]').forEach((b) => { b.onclick = () => { elegidas.splice(Number(b.dataset.quitar), 1); pintarSeleccion(); pintarManual(); }; });
   };
   const pintarManual = () => {
@@ -315,7 +318,7 @@ async function vistaNuevaSesion() {
     const vis = preguntas.filter((p) => (!et || p.etiquetas.includes(et)) && (!txt || claveDuplicado(p.enunciado).includes(txt))).slice(0, 300);
     $f.querySelector('#manual').innerHTML = vis.map((p) => `
       <li><label><input type="checkbox" value="${p.id}" ${elegidas.includes(p.id) ? 'checked' : ''}>
-        <span>${esc(p.enunciado)} ${p.etiquetas.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</span></label></li>`).join('');
+        <span>${esc(p.enunciado)} ${chipsMedios(p)} ${p.etiquetas.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</span></label></li>`).join('');
     $f.querySelectorAll('#manual input').forEach((c) => {
       c.onchange = () => {
         const i = elegidas.indexOf(c.value);
@@ -351,8 +354,11 @@ async function vistaNuevaSesion() {
     e.preventDefault();
     const lanzar = e.submitter?.dataset.lanzar === '1';
     if (!elegidas.length) return toast('Elige al menos una pregunta', 'error');
+    const modo = $f.querySelector('input[name=modo]:checked').value;
+    if (modo === 'fijo' && $f.querySelector('#bar-preg').checked && elegidas.some((id) => porId.get(id).video)) {
+      return toast('Hay preguntas con vídeo: desmarca «Barajar el orden de las preguntas».', 'error');
+    }
     intentar(async () => {
-      const modo = $f.querySelector('input[name=modo]:checked').value;
       const s = await q(sb.from('sesiones').insert({
         grupo_id: $f.querySelector('#grupo').value,
         titulo: $f.querySelector('#titulo').value.trim() || `Sesión ${fechaCorta(hoyISO())}`,
@@ -394,7 +400,30 @@ async function vistaProyector(id) {
   let respondidas = 0;
   let participantes = 0;
 
-  const salirProyector = () => { vivo = false; clearTimeout(temporizador); capa.remove(); document.removeEventListener('keydown', teclas); };
+  // Clips propios: se bajan una vez al abrir el proyector y se reproducen de
+  // memoria (sin cortes por la wifi). Los móviles nunca bajan vídeo.
+  const clips = new Map();   // nombre -> URL blob (null mientras baja)
+  const precargarClips = async () => {
+    for (const x of sp) {
+      if (!x.video || x.video.startsWith('yt:') || clips.has(x.video)) continue;
+      clips.set(x.video, null);
+      try {
+        const res = await fetch(urlMedio(x.video));
+        if (!res.ok) throw new Error(res.status);
+        clips.set(x.video, URL.createObjectURL(await res.blob()));
+      } catch {
+        clips.delete(x.video);
+      }
+    }
+  };
+
+  const salirProyector = () => {
+    vivo = false;
+    clearTimeout(temporizador);
+    capa.remove();
+    document.removeEventListener('keydown', teclas);
+    clips.forEach((u) => u && URL.revokeObjectURL(u));
+  };
   limpiarVista = salirProyector;
   const urlAlumno = () => `${new URL('./', location.href).href}?c=${s.codigo}`;
 
@@ -408,7 +437,7 @@ async function vistaProyector(id) {
   async function cargar() {
     [s, sp] = await Promise.all([
       q(sb.from('sesiones').select('*, grupos(nombre)').eq('id', id).single()),
-      q(sb.from('sesion_preguntas').select('posicion, enunciado, opciones, correcta, explicacion, abierta_en, cierra_en').eq('sesion_id', id).order('posicion')),
+      q(sb.from('sesion_preguntas').select('posicion, enunciado, opciones, correcta, explicacion, imagen, video, video_desde_s, video_s, abierta_en, cierra_en').eq('sesion_id', id).order('posicion')),
     ]);
   }
 
@@ -421,12 +450,14 @@ async function vistaProyector(id) {
     const abierta = v.find((x) => t >= x.abre && t < x.cierra);
     if (abierta) return { tipo: 'pregunta', ...abierta };
     const proxima = v.find((x) => t < x.abre);
+    const video = proxima ? (sp[proxima.turno].video_s || 0) * 1000 : 0;
+    if (video && t >= proxima.abre - video) return { tipo: 'video', turno: proxima.turno, desde: proxima.abre - video, hasta: proxima.abre };
     if (proxima && proxima.turno === 0) return { tipo: 'cuenta', hasta: proxima.abre };
     const cerradas = v.filter((x) => t >= x.cierra);
     const ultima = cerradas[cerradas.length - 1];
     if (!ultima) return { tipo: 'cuenta', hasta: null };
     const esUltima = ultima.turno === sp.length - 1;
-    return { tipo: esUltima ? 'acabada' : 'entre', turno: ultima.turno, cierra: ultima.cierra, hasta: proxima?.abre ?? null };
+    return { tipo: esUltima ? 'acabada' : 'entre', turno: ultima.turno, cierra: ultima.cierra, hasta: proxima ? proxima.abre - video : null };
   }
 
   async function bucle() {
@@ -529,6 +560,39 @@ async function vistaProyector(id) {
       </li>`).join('')}</ul>`;
   }
 
+  function imagenYOpciones(q0, rev) {
+    const ops = opcionesHTML(q0, rev);
+    return q0.imagen
+      ? `<div class="p-con-imagen"><img class="p-imagen" src="${esc(urlMedio(q0.imagen))}" alt=""><div>${ops}</div></div>`
+      : ops;
+  }
+
+  // Si el proyector entra tarde (recarga), el vídeo empieza por donde toca.
+  const segundoVideo = (q0, f) => q0.video_desde_s + Math.max(0, (ahora() - f.desde) / 1000);
+
+  function iframeYouTube(q0, f) {
+    const p = new URLSearchParams({
+      start: Math.floor(segundoVideo(q0, f)), end: q0.video_desde_s + q0.video_s,
+      autoplay: 1, controls: 0, rel: 0, playsinline: 1, modestbranding: 1, iv_load_policy: 3,
+    });
+    return `<iframe src="https://www.youtube-nocookie.com/embed/${q0.video.slice(3)}?${p}" allow="autoplay; encrypted-media"
+      allowfullscreen title="Vídeo de la pregunta"></iframe>`;
+  }
+
+  function arrancarClip($v, q0, f) {
+    const fin = q0.video_desde_s + q0.video_s;
+    $v.addEventListener('loadedmetadata', () => {
+      $v.currentTime = Math.min(fin, segundoVideo(q0, f));
+      $v.play().catch(() => {
+        // Sin un clic previo en esta página (p. ej. tras recargar) el navegador no deja reproducir con sonido.
+        const $b = capa.querySelector('[data-play]');
+        if ($b) { $b.hidden = false; $b.onclick = () => { $v.play(); $b.hidden = true; }; }
+      });
+    }, { once: true });
+    $v.addEventListener('timeupdate', () => { if ($v.currentTime >= fin) $v.pause(); });
+    $v.src = clips.get(q0.video) || urlMedio(q0.video);
+  }
+
   function rankingHTML(lista, campo = 'puntos') {
     if (!lista?.length) return '';
     return `<ol class="p-ranking">${lista.map((r, i) => `
@@ -564,12 +628,19 @@ async function vistaProyector(id) {
         </div>`;
     } else if (f.tipo === 'cuenta') {
       cuerpo = `<div class="p-centro"><p class="p-num">¡Preparados!</p><p class="p-grande" data-cuenta>…</p></div>`;
+    } else if (f.tipo === 'video') {
+      const q0 = sp[f.turno];
+      cuerpo = `<div class="p-cabeza"><span class="p-num">Pregunta ${f.turno + 1} de ${n}</span>
+          <span class="p-num">Respuestas en <span data-cuenta>…</span> s</span></div>
+        <p class="p-enunciado">${esc(q0.enunciado)}</p>
+        <div class="p-video">${q0.video.startsWith('yt:') ? iframeYouTube(q0, f) : '<video playsinline preload="auto"></video>'}</div>
+        <div class="p-pie"><button class="btn" type="button" data-play hidden>▶ Reproducir el vídeo</button></div>`;
     } else if (f.tipo === 'pregunta') {
       const q0 = sp[f.turno];
       cuerpo = `<div class="p-cabeza"><span class="p-num">Pregunta ${f.turno + 1} de ${n}</span><span class="p-reloj" data-reloj>--</span></div>
         ${s.barajar_preguntas
           ? '<div class="p-centro"><p class="p-grande">Responde en tu móvil</p><p class="p-num">Cada alumno tiene las preguntas en un orden distinto.</p></div>'
-          : `<p class="p-enunciado">${esc(q0.enunciado)}</p>${opcionesHTML(q0, null)}`}
+          : `<p class="p-enunciado">${esc(q0.enunciado)}</p>${imagenYOpciones(q0, null)}`}
         <div class="p-pie"><span class="p-respondido" data-resp></span>
           ${s.modo === 'manual' ? '<button class="btn oscuro" type="button" data-cerrarya>Cerrar ya</button>' : ''}</div>`;
     } else if (f.tipo === 'entre' || f.tipo === 'acabada') {
@@ -586,7 +657,7 @@ async function vistaProyector(id) {
         ${s.barajar_preguntas
           ? '<div class="p-centro"><p class="p-grande">Tiempo</p><p class="p-num">Las respuestas correctas se verán al final.</p></div>'
           : `<p class="p-enunciado">${esc(q0.enunciado)}</p>
-             <div class="${rev?.revelada ? 'p-revelado' : ''}">${opcionesHTML(q0, rev?.revelada ? rev : null)}</div>
+             <div class="${rev?.revelada ? 'p-revelado' : ''}">${imagenYOpciones(q0, rev?.revelada ? rev : null)}</div>
              ${rev?.revelada && rev.explicacion ? `<p class="p-explicacion">${esc(rev.explicacion)}</p>` : ''}
              ${rev?.revelada && rankingTurno === f.turno && ranking?.length ? `<h2>Top 5</h2>${rankingHTML(ranking)}` : ''}`}
         <div class="p-pie">${siguiente}</div>`;
@@ -600,6 +671,8 @@ async function vistaProyector(id) {
         </div>`;
     }
     capa.innerHTML = `${barra()}<div class="p-cuerpo">${cuerpo}</div>`;
+    const $clip = capa.querySelector('.p-video video');
+    if ($clip) arrancarClip($clip, sp[f.turno], f);
     capa.querySelector('[data-cerrar]').onclick = () => ir('#/sesiones');
     capa.querySelectorAll('[data-pc]').forEach((b) => { b.onclick = pantallaCompleta; });
     capa.querySelector('[data-lanzar]')?.addEventListener('click', (e) => intentar(async () => {
@@ -636,14 +709,117 @@ async function vistaProyector(id) {
     capa.innerHTML = `<div class="p-centro"><p class="error">${esc(e.message)}</p><a class="btn" href="#/sesiones">Volver</a></div>`;
     return;
   }
+  precargarClips();
   bucle();
 }
+
+// ---------------------------------------------------------------- imágenes y vídeos
+// Plan gratuito de Supabase: 1 GB de archivos y 5 GB de descarga al mes. Las
+// imágenes se reducen antes de subir, los vídeos solo los baja el proyector y
+// el nombre es el sha256 del contenido (lo repetido no se sube dos veces y los
+// móviles lo guardan para siempre).
+
+const MAX_LADO = 1280;               // px: nítida en el proyector, ~100 KB
+const MAX_VIDEO = 20 * 1024 * 1024;  // = file_size_limit del bucket
+const MAX_TRAMO = 180;               // s: = check de video_s
+const mb = (b) => `${(b / 1048576).toLocaleString('es-ES', { maximumFractionDigits: 1 })} MB`;
+const kb = (b) => `${Math.max(1, Math.round(b / 1024))} KB`;
+
+async function comprimirImagen(archivo) {
+  const bmp = await createImageBitmap(archivo);
+  const escala = Math.min(1, MAX_LADO / Math.max(bmp.width, bmp.height));
+  const ancho = Math.round(bmp.width * escala);
+  const alto = Math.round(bmp.height * escala);
+  const lienzo = Object.assign(document.createElement('canvas'), { width: ancho, height: alto });
+  const ctx = lienzo.getContext('2d');
+  ctx.fillStyle = '#fff';  // los PNG transparentes, sobre blanco como en la app
+  ctx.fillRect(0, 0, ancho, alto);
+  ctx.drawImage(bmp, 0, 0, ancho, alto);
+  bmp.close?.();
+  const aBlob = (tipo, calidad) => new Promise((res) => lienzo.toBlob(res, tipo, calidad));
+  let blob = await aBlob('image/webp', 0.8);
+  let ext = 'webp';
+  if (blob?.type !== 'image/webp') { blob = await aBlob('image/jpeg', 0.82); ext = 'jpg'; }
+  return { blob, ext, ancho, alto };
+}
+
+function duracionVideo(archivo) {
+  return new Promise((resolve) => {
+    const v = document.createElement('video');
+    const url = URL.createObjectURL(archivo);
+    const fin = (d) => { URL.revokeObjectURL(url); resolve(Number.isFinite(d) ? d : null); };
+    v.preload = 'metadata';
+    v.onloadedmetadata = () => fin(v.duration);
+    v.onerror = () => fin(null);
+    v.src = url;
+  });
+}
+
+const extVideo = (f) => (f.type === 'video/webm' || /\.webm$/i.test(f.name) ? 'webm' : 'mp4');
+
+// youtu.be/ID, watch?v=ID, shorts/ID, embed/ID; t=90 o t=1m30s da el "desde".
+function leerYouTube(texto) {
+  let u;
+  try { u = new URL(String(texto).trim()); } catch { return null; }
+  const host = u.hostname.replace(/^(www\.|m\.)/, '');
+  let id = null;
+  if (host === 'youtu.be') id = u.pathname.slice(1);
+  else if (host === 'youtube.com' || host === 'youtube-nocookie.com') {
+    id = u.searchParams.get('v') || u.pathname.match(/^\/(?:shorts|embed|live)\/([^/]+)/)?.[1];
+  }
+  if (!/^[A-Za-z0-9_-]{11}$/.test(id || '')) return null;
+  const m = (u.searchParams.get('t') || u.searchParams.get('start') || '').match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/);
+  const desde = m ? Number(m[1] || 0) * 3600 + Number(m[2] || 0) * 60 + Number(m[3] || 0) : 0;
+  return { id, desde };
+}
+
+async function subirMedio(blob, ext, tipo = blob.type) {
+  const huella = new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()));
+  const nombre = `${[...huella].map((b) => b.toString(16).padStart(2, '0')).join('')}.${ext}`;
+  // supabase-js sube un Blob con su propio tipo: sin tipo, el bucket lo rechazaría.
+  const cuerpo = blob.type === tipo ? blob : new Blob([blob], { type: tipo });
+  const { error } = await sb.storage.from('medios').upload(nombre, cuerpo, {
+    cacheControl: '31536000', contentType: tipo, upsert: false,
+  });
+  // Ya estaba subido (mismo contenido): sirve el que hay.
+  if (error && String(error.statusCode) !== '409' && !/exists|duplicate/i.test(error.message)) {
+    throw new Error(`No se ha podido subir el archivo: ${error.message}`);
+  }
+  return nombre;
+}
+
+async function usoMedios() {
+  const filas = await q(sb.rpc('medios_uso'));
+  const suma = (l) => l.reduce((a, f) => a + Number(f.bytes), 0);
+  const sinUso = filas.filter((f) => !f.en_uso);
+  return { total: suma(filas), sinUso, bytesSinUso: suma(sinUso) };
+}
+
+// Borra los archivos que ya no usa ninguna pregunta ni sesión.
+async function limpiarMedios() {
+  const { sinUso } = await usoMedios();
+  for (let i = 0; i < sinUso.length; i += 100) {
+    const { error } = await sb.storage.from('medios').remove(sinUso.slice(i, i + 100).map((f) => f.nombre));
+    if (error) throw new Error(error.message);
+  }
+  return sinUso.length;
+}
+
+const chipsMedios = (p) => `${p.imagen ? '<span class="chip">imagen</span>' : ''}${p.video ? `<span class="chip">vídeo ${p.video_s} s</span>` : ''}`;
 
 // ---------------------------------------------------------------- preguntas
 
 function editorPregunta(p, alGuardar) {
   const d = document.createElement('dialog');
   const v = p || { enunciado: '', opciones: ['', '', '', '', ''], correcta: 0, explicacion: '', etiquetas: [], dificultad: null };
+  // Lo nuevo se sube al guardar, no al elegirlo: si se cancela, no queda nada en Storage.
+  const m = {
+    imagen: v.imagen || null,
+    imagenNueva: null,
+    tipo: !v.video ? '' : v.video.startsWith('yt:') ? 'yt' : 'archivo',
+    videoNuevo: null,
+    duracion: null,
+  };
   d.innerHTML = `
     <form method="dialog">
       <h2>${p ? 'Editar' : 'Nueva'} pregunta</h2>
@@ -656,6 +832,31 @@ function editorPregunta(p, alGuardar) {
           <input type="text" data-op="${i}" value="${esc(o)}" required>
         </div>`).join('')}
       <div class="campo"><label for="e-exp">Explicación (se ve al cerrar la pregunta)</label><textarea id="e-exp">${esc(v.explicacion)}</textarea></div>
+      <fieldset class="medios-edit">
+        <legend>Imagen y vídeo (opcional)</legend>
+        <div class="medio-fila">
+          <img id="e-img-prev" alt="" ${m.imagen ? `src="${esc(urlMedio(m.imagen))}"` : 'hidden'}>
+          <label class="btn peque secundario" style="margin:0">Elegir imagen<input type="file" id="e-img" accept="image/*" hidden></label>
+          <button class="btn peque secundario" type="button" id="e-img-quitar" ${m.imagen ? '' : 'hidden'}>Quitar</button>
+          <span class="ayuda" id="e-img-info">Se ve en el móvil y en el proyector. Se reduce sola para que pese poco.</span>
+        </div>
+        <div class="campo"><label for="e-vid-tipo">Vídeo: solo en el proyector, antes de poder responder</label>
+          <select id="e-vid-tipo">
+            <option value="">Sin vídeo</option>
+            <option value="archivo" ${m.tipo === 'archivo' ? 'selected' : ''}>Clip propio (mp4, máx. 20 MB)</option>
+            <option value="yt" ${m.tipo === 'yt' ? 'selected' : ''}>Enlace de YouTube (no ocupa espacio)</option>
+          </select></div>
+        <div class="medio-fila" id="e-vid-archivo" hidden>
+          <label class="btn peque secundario" style="margin:0">Elegir clip<input type="file" id="e-vid" accept="video/mp4,video/webm" hidden></label>
+          <span class="ayuda" id="e-vid-info">${m.tipo === 'archivo' ? 'Clip ya subido. Elige otro para cambiarlo.' : 'Mejor cortado al trozo que interesa y en 720p: pesa mucho menos.'}</span>
+        </div>
+        <div class="campo" id="e-vid-yt" hidden><label for="e-yt">Enlace de YouTube</label>
+          <input id="e-yt" type="url" placeholder="https://youtu.be/…" value="${m.tipo === 'yt' ? `https://youtu.be/${esc(v.video.slice(3))}` : ''}"></div>
+        <div class="fila" id="e-vid-tramo" hidden>
+          <div class="campo"><label for="e-desde">Desde el segundo</label><input id="e-desde" type="number" min="0" step="1" value="${v.video ? v.video_desde_s : 0}"></div>
+          <div class="campo"><label for="e-hasta">Hasta el segundo</label><input id="e-hasta" type="number" min="1" step="1" value="${v.video ? v.video_desde_s + v.video_s : ''}"></div>
+        </div>
+      </fieldset>
       <div class="fila">
         <div class="campo"><label for="e-et">Etiquetas (separadas por comas)</label><input id="e-et" type="text" value="${esc(v.etiquetas.join(', '))}"></div>
         <div class="campo" style="max-width:140px"><label for="e-dif">Dificultad</label>
@@ -666,6 +867,84 @@ function editorPregunta(p, alGuardar) {
     </form>`;
   document.body.append(d);
   d.showModal();
+  const $ = (sel) => d.querySelector(sel);
+  const sincronizarVideo = () => {
+    m.tipo = $('#e-vid-tipo').value;
+    $('#e-vid-archivo').hidden = m.tipo !== 'archivo';
+    $('#e-vid-yt').hidden = m.tipo !== 'yt';
+    $('#e-vid-tramo').hidden = !m.tipo;
+  };
+  $('#e-vid-tipo').onchange = sincronizarVideo;
+  sincronizarVideo();
+  $('#e-img').onchange = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    try {
+      m.imagenNueva = await comprimirImagen(f);
+      $('#e-img-prev').src = URL.createObjectURL(m.imagenNueva.blob);
+      $('#e-img-prev').hidden = false;
+      $('#e-img-quitar').hidden = false;
+      $('#e-img-info').textContent = `${m.imagenNueva.ancho}×${m.imagenNueva.alto} · ${kb(m.imagenNueva.blob.size)} (la original pesaba ${kb(f.size)})`;
+    } catch {
+      $('#e-img-info').textContent = 'No se ha podido leer la imagen.';
+    }
+  };
+  $('#e-img-quitar').onclick = () => {
+    m.imagen = null;
+    m.imagenNueva = null;
+    $('#e-img-prev').hidden = true;
+    $('#e-img-quitar').hidden = true;
+    $('#e-img-info').textContent = 'Sin imagen.';
+  };
+  $('#e-vid').onchange = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > MAX_VIDEO) {
+      m.videoNuevo = null;
+      $('#e-vid-info').textContent = `Pesa ${mb(f.size)} y el máximo es 20 MB: recórtalo o bájale la calidad (720p).`;
+      return;
+    }
+    m.videoNuevo = f;
+    m.duracion = await duracionVideo(f);
+    $('#e-desde').value = 0;
+    $('#e-hasta').value = m.duracion ? Math.min(Math.round(m.duracion), MAX_TRAMO) : '';
+    $('#e-vid-info').textContent = `${f.name} · ${mb(f.size)}${m.duracion ? ` · ${Math.round(m.duracion)} s` : ''}`;
+  };
+  $('#e-yt').oninput = () => {
+    const yt = leerYouTube($('#e-yt').value);
+    if (yt?.desde) $('#e-desde').value = yt.desde;
+  };
+
+  // Valida el vídeo, sube lo nuevo y devuelve las columnas de medios.
+  const camposMedios = async () => {
+    const c = { imagen: m.imagen, video: null, video_desde_s: 0, video_s: null };
+    if (m.tipo) {
+      const desde = Math.max(0, Math.floor(Number($('#e-desde').value) || 0));
+      const hasta = Math.floor(Number($('#e-hasta').value) || 0);
+      if (hasta <= desde) throw new Error('Vídeo: «hasta» tiene que ser mayor que «desde».');
+      if (hasta - desde > MAX_TRAMO) throw new Error(`Vídeo: como mucho ${MAX_TRAMO} s.`);
+      if (m.tipo === 'yt') {
+        const yt = leerYouTube($('#e-yt').value);
+        if (!yt) throw new Error('Vídeo: el enlace de YouTube no es válido.');
+        c.video = `yt:${yt.id}`;
+      } else if (m.videoNuevo) {
+        if (m.duracion && hasta > Math.ceil(m.duracion)) throw new Error(`Vídeo: el clip dura ${Math.round(m.duracion)} s.`);
+      } else if (v.video && !v.video.startsWith('yt:')) {
+        c.video = v.video;
+      } else {
+        throw new Error('Vídeo: elige el clip.');
+      }
+      c.video_desde_s = desde;
+      c.video_s = hasta - desde;
+    }
+    if (m.imagenNueva) c.imagen = await subirMedio(m.imagenNueva.blob, m.imagenNueva.ext);
+    if (m.tipo === 'archivo' && m.videoNuevo) {
+      const ext = extVideo(m.videoNuevo);
+      c.video = await subirMedio(m.videoNuevo, ext, m.videoNuevo.type || `video/${ext}`);
+    }
+    return c;
+  };
+
   d.querySelector('form').onsubmit = async (e) => {
     if (e.submitter?.value !== 'ok') return;
     e.preventDefault();
@@ -679,12 +958,29 @@ function editorPregunta(p, alGuardar) {
     });
     const $err = d.querySelector('.error');
     if (errores.length) { $err.textContent = errores.join('; '); $err.hidden = false; return; }
-    const ok = await intentar(async () => {
-      if (p) await q(sb.from('preguntas').update(pregunta).eq('id', p.id));
-      else await q(sb.from('preguntas').insert(pregunta));
-      return true;
-    }, e.submitter);
-    if (ok) { d.close(); toast('Pregunta guardada'); alGuardar(); }
+    const $b = e.submitter;
+    $b.textContent = m.imagenNueva || m.videoNuevo ? 'Subiendo…' : 'Guardando…';
+    const fila = await intentar(async () => {
+      let medios;
+      try {
+        medios = await camposMedios();
+      } catch (err) {
+        $err.textContent = err.message;
+        $err.hidden = false;
+        return null;
+      }
+      const datos = { ...pregunta, ...medios };
+      if (p) await q(sb.from('preguntas').update(datos).eq('id', p.id));
+      else await q(sb.from('preguntas').insert(datos));
+      return datos;
+    }, $b);
+    $b.textContent = 'Guardar';
+    if (!fila) return;
+    d.close();
+    toast('Pregunta guardada');
+    alGuardar();
+    // Si se ha cambiado o quitado un archivo, el viejo ya no lo usa nadie.
+    if (p && (p.imagen !== fila.imagen || p.video !== fila.video)) limpiarMedios().catch(() => {});
   };
   d.addEventListener('close', () => d.remove());
 }
@@ -699,6 +995,7 @@ async function vistaPreguntas() {
       <label class="btn oscuro" style="margin:0">Importar XML / CSV / JSON<input type="file" id="fichero" accept=".xml,.csv,.json,.txt" hidden></label>
       <a class="btn secundario" href="preguntas_ejemplo.csv" download>CSV de ejemplo</a>
     </div>
+    <p class="ayuda" id="espacio"></p>
     <div id="importacion"></div>
     <div class="caja">
       <div class="fila" style="margin-bottom:12px">
@@ -718,7 +1015,7 @@ async function vistaPreguntas() {
     filtradas = preguntas.filter((p) => (!et || p.etiquetas.includes(et)) && (!txt || p.clave_duplicado.includes(txt)));
     $app.querySelector('#mostrando').textContent = `${filtradas.length} pregunta${filtradas.length === 1 ? '' : 's'}${filtradas.length > 300 ? ' (se muestran 300)' : ''}`;
     $app.querySelector('#filas').innerHTML = filtradas.slice(0, 300).map((p) => `
-      <tr><td class="corto">${esc(p.enunciado)}</td>
+      <tr><td class="corto">${esc(p.enunciado)} ${chipsMedios(p)}</td>
         <td class="corto"><strong>${LETRAS[p.correcta]}</strong> · ${esc(p.opciones[p.correcta])}</td>
         <td>${p.etiquetas.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</td>
         <td class="num">${p.dificultad ?? ''}</td>
@@ -729,7 +1026,11 @@ async function vistaPreguntas() {
     $app.querySelectorAll('[data-bo]').forEach((b) => {
       b.onclick = () => {
         if (!confirm('¿Borrar esta pregunta del banco? Las sesiones ya hechas conservan su copia.')) return;
-        intentar(async () => { await q(sb.from('preguntas').delete().eq('id', b.dataset.bo)); vistaPreguntas(); }, b);
+        intentar(async () => {
+          await q(sb.from('preguntas').delete().eq('id', b.dataset.bo));
+          await limpiarMedios().catch(() => {});
+          vistaPreguntas();
+        }, b);
       };
     });
   };
@@ -741,6 +1042,7 @@ async function vistaPreguntas() {
     intentar(async () => {
       const ids = filtradas.map((p) => p.id);
       for (let i = 0; i < ids.length; i += 200) await q(sb.from('preguntas').delete().in('id', ids.slice(i, i + 200)));
+      await limpiarMedios().catch(() => {});
       toast(`${ids.length} preguntas borradas`);
       vistaPreguntas();
     }, e.target);
@@ -758,6 +1060,23 @@ async function vistaPreguntas() {
     previsualizarImportacion(archivo.name, leidas, new Set(preguntas.map((p) => p.clave_duplicado)));
   };
   pintarFilas();
+  pintarEspacio();
+}
+
+async function pintarEspacio() {
+  const $e = $app.querySelector('#espacio');
+  if (!$e) return;
+  try {
+    const u = await usoMedios();
+    $e.innerHTML = `Imágenes y vídeos: <strong>${mb(u.total)}</strong> de 1 GB (plan gratuito)${u.sinUso.length
+      ? ` · <button class="btn-link" type="button" id="limpiar">liberar ${mb(u.bytesSinUso)} que ya no usa ninguna pregunta</button>` : ''}`;
+    $e.querySelector('#limpiar')?.addEventListener('click', (ev) => intentar(async () => {
+      toast(`${await limpiarMedios()} archivos borrados`);
+      pintarEspacio();
+    }, ev.target));
+  } catch {
+    $e.textContent = '';
+  }
 }
 
 function previsualizarImportacion(nombre, leidas, existentes) {
@@ -933,6 +1252,7 @@ async function vistaGrupos(grupoId) {
     intentar(async () => {
       await q(sb.from('sesiones').delete().eq('grupo_id', actual));
       await q(sb.from('grupos').delete().eq('id', actual));
+      await limpiarMedios().catch(() => {});
       toast('Grupo borrado');
       ir('#/grupos');
     }, e.target);

@@ -1,8 +1,9 @@
 // Service worker: guarda la app entera para que una recarga sin red funcione.
 // Al publicar cambios, sube VERSION: así los móviles descargan la versión nueva.
-const VERSION = 'thq-2026-10-14-1';
+const VERSION = 'thq-2026-10-14-2';
 const CACHE = `app-${VERSION}`;
 const CACHE_EXTRA = 'extra-v1';
+const CACHE_MEDIOS = 'medios-v1';  // el mismo nombre que en js/api.js
 
 const APP = [
   './',
@@ -54,6 +55,21 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
+  // Imágenes de las preguntas: no cambian nunca (nombre = sha256). Se sirven
+  // de la caché aunque no haya red, y cada móvil las baja una sola vez.
+  if (esSupabase(url) && req.destination === 'image' && url.pathname.includes('/storage/v1/object/public/')) {
+    e.respondWith((async () => {
+      const c = await caches.open(CACHE_MEDIOS);
+      const guardada = await c.match(req.url);
+      if (guardada) return guardada;
+      // cors y no la petición de la <img> (no-cors): una respuesta opaca ocupa
+      // varios MB de cuota en la caché.
+      const res = await fetch(req.url, { mode: 'cors' });
+      if (res.ok) c.put(req.url, res.clone());
+      return res;
+    })());
+    return;
+  }
   // La API y Realtime siempre van a la red: nunca respuestas viejas.
   if (esSupabase(url)) return;
 

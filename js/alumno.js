@@ -1,5 +1,5 @@
 import { kv, cola } from './db.js';
-import { rpc, aMs, medirDesfase, escucharSesion, ErrorRed, ErrorServidor } from './api.js';
+import { rpc, aMs, medirDesfase, escucharSesion, ErrorRed, ErrorServidor, urlMedio, CACHE_MEDIOS } from './api.js';
 import { escanearQR, extraerCodigo } from './qr.js';
 
 const LETRAS = ['A', 'B', 'C', 'D', 'E'];
@@ -10,6 +10,7 @@ const ICONOS = {
   libro: svg('<path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5M8 7h7M8 11h5"/>'),
   barras: svg('<path d="M4 20h16M7 16v-4M12 16V8M17 16V5"/>'),
   diana: svg('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r=".5"/><path d="M20 4l-6 6M17 4h3v3"/>'),
+  video: svg('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l5 3-5 3z"/>'),
 };
 const LS_CRED = 'thq_credenciales';
 const LS_TOKEN = 'thq_ultimo_token';
@@ -196,9 +197,12 @@ function fase() {
   if (abierta) return { tipo: 'pregunta', ...abierta };
   const proxima = v.find((x) => t < x.abre);
   if (proxima) {
+    // Antes de una pregunta con vídeo, el vídeo se ve en el proyector.
+    const video = (preguntaDeTurno(proxima.turno)?.video_s || 0) * 1000;
+    if (video && t >= proxima.abre - video) return { tipo: 'video', turno: proxima.turno, hasta: proxima.abre };
     return proxima.turno === 0
-      ? { tipo: 'cuenta', hasta: proxima.abre }
-      : { tipo: 'pausa', hasta: proxima.abre, turnoPrevio: proxima.turno - 1, cierrePrevio: v[proxima.turno - 1]?.cierra };
+      ? { tipo: 'cuenta', hasta: proxima.abre - video }
+      : { tipo: 'pausa', hasta: proxima.abre - video, turnoPrevio: proxima.turno - 1, cierrePrevio: v[proxima.turno - 1]?.cierra };
   }
   const ultima = v[v.length - 1];
   if (ultima.turno >= n - 1) return { tipo: 'final' };
@@ -229,6 +233,7 @@ function pintarJuego(f, clave) {
   if (f.tipo === 'espera') return pintarEspera();
   if (f.tipo === 'cuenta') return pintarCuenta();
   if (f.tipo === 'pregunta') return pintarPregunta(f);
+  if (f.tipo === 'video') return pintarVideo(f);
   if (f.tipo === 'pausa') return pintarPausa(f);
   if (f.tipo === 'final') { resultadoFinal = null; pintarFinal(); cargarResultadoFinal(); }
 }
@@ -262,6 +267,17 @@ function pintarCuenta() {
     </section>`;
 }
 
+function pintarVideo(f) {
+  $app.innerHTML = `
+    <section class="pantalla centro">
+      <div class="icono-video">${ICONOS.video}</div>
+      <h1>Mira el <b>proyector</b></h1>
+      <p class="sub">Pregunta ${f.turno + 1} de ${r.preguntas.length}: primero un vídeo.</p>
+      <p class="sub">Podrás responder en</p>
+      <div class="grande" id="cuenta">--</div>
+    </section>`;
+}
+
 function pintarPregunta(f) {
   const p = preguntaDeTurno(f.turno);
   const perm = r.perms[p.posicion] || [0, 1, 2, 3, 4];
@@ -275,6 +291,7 @@ function pintarPregunta(f) {
       </div>
       <div class="tiempo" aria-hidden="true"><div id="barra-tiempo"></div></div>
       <p class="enunciado">${esc(p.enunciado)}</p>
+      ${p.imagen ? `<img class="imagen-preg" src="${esc(urlMedio(p.imagen))}" alt="Imagen de la pregunta">` : ''}
       <ul class="opciones${ya ? ' bloqueadas' : ''}" id="opciones">
         ${perm.map((orig, i) => `
           <li><button class="opcion${elegida === i ? ' elegida' : ''}" type="button" data-i="${i}" ${ya ? 'disabled' : ''}>
@@ -609,6 +626,7 @@ async function dentro(res, codigo, idAlumno, pin, recordar, desfase) {
     tokenInvalido: false,
   };
   await guardar();
+  precargarImagenes(res.preguntas);
   await kv.set(`token:${res.sesion.id}`, res.token);
   lsSet(LS_TOKEN, res.token);
   // undefined = no tocar lo recordado (reentrada desde la pantalla de PIN).
@@ -620,6 +638,20 @@ async function dentro(res, codigo, idAlumno, pin, recordar, desfase) {
     if (item.estado === 'sin_token') { item.estado = 'pendiente'; await cola.poner(item); }
   }
   arrancar();
+}
+
+// Las imágenes se bajan al entrar, con red, para que se vean aunque se caiga
+// a mitad del cuestionario. Quedan guardadas: la misma imagen no se vuelve a bajar.
+async function precargarImagenes(preguntas) {
+  if (!('caches' in window)) return;
+  try {
+    const c = await caches.open(CACHE_MEDIOS);
+    for (const p of preguntas) {
+      if (!p.imagen) continue;
+      const url = urlMedio(p.imagen);
+      if (!(await c.match(url))) await c.add(url).catch(() => {});
+    }
+  } catch { /* sin Cache API: se cargan al verlas */ }
 }
 
 function arrancar() {

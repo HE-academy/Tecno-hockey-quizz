@@ -27,6 +27,14 @@ await db.exec(`
   create schema extensions; grant usage on schema extensions to anon, authenticated;
   grant usage on schema public to anon, authenticated;
   create publication supabase_realtime;
+  -- Lo mínimo de Supabase Storage (RLS activado en objects, como allí).
+  create schema storage; grant usage on schema storage to anon, authenticated;
+  create table storage.buckets (id text primary key, name text, public boolean,
+    file_size_limit bigint, allowed_mime_types text[]);
+  create table storage.objects (id uuid primary key default gen_random_uuid(),
+    bucket_id text references storage.buckets (id), name text, metadata jsonb);
+  alter table storage.objects enable row level security;
+  grant all on storage.objects to anon, authenticated;
   -- Supabase concede por defecto todo a anon/authenticated en public:
   alter default privileges in schema public grant all on tables to anon, authenticated;
   alter default privileges in schema public grant all on functions to anon, authenticated;
@@ -300,6 +308,63 @@ await q(`select quitar_pin($1)`, [idLaia]);
 await comoAnon();
 ok((await unirse(c4, 'm200', '4321')).error === 'sin_pin', 'profe quita el PIN -> vuelve a elegirlo');
 ok((await elegir(c4, 'm200', '8888')).ok, 'elige uno nuevo y entra');
+
+// Medios: imagen (móvil y proyector) y vídeo (solo proyector, antes de responder)
+await comoProfe();
+const IMG = `${'a'.repeat(64)}.webp`;
+const IMG2 = `${'b'.repeat(64)}.webp`;
+ok(await falla(`insert into preguntas (enunciado, opciones, correcta, imagen) values ('x', array['a','b','c','d','e'], 0, 'foto.png')`),
+  'imagen: solo nombres sha256 del bucket');
+ok(await falla(`insert into preguntas (enunciado, opciones, correcta, video) values ('x', array['a','b','c','d','e'], 0, 'yt:dQw4w9WgXcQ')`),
+  'vídeo sin duración rechazado');
+const pv = (await q1(`insert into preguntas (enunciado, opciones, correcta, imagen, video, video_desde_s, video_s)
+  values ('Con vídeo', array['a','b','c','d','e'], 1, $1, 'yt:dQw4w9WgXcQ', 30, 12) returning id`, [IMG])).id;
+const pi = (await q1(`insert into preguntas (enunciado, opciones, correcta, imagen)
+  values ('Con imagen', array['a','b','c','d','e'], 2, $1) returning id`, [IMG2])).id;
+const s5 = (await q1(`insert into sesiones (grupo_id, titulo, modo, tiempo_s, pausa_s, barajar_preguntas)
+  values ($1, 'Medios', 'fijo', 20, 5, false) returning id`, [g])).id;
+await q(`select asignar_preguntas($1, $2::uuid[])`, [s5, [pregs[0], pv, pi]]);
+const cp5 = await q1(`select imagen, video, video_desde_s, video_s from sesion_preguntas where sesion_id = $1 and posicion = 1`, [s5]);
+ok(cp5.imagen === IMG && cp5.video === 'yt:dQw4w9WgXcQ' && cp5.video_desde_s === 30 && cp5.video_s === 12, 'asignar copia imagen y vídeo');
+const s6 = (await q1(`insert into sesiones (grupo_id, titulo, barajar_preguntas) values ($1, 'Barajada', true) returning id`, [g])).id;
+await q(`select asignar_preguntas($1, $2::uuid[])`, [s6, [pv, pi]]);
+ok(await falla(`select lanzar_sesion($1)`, [s6], /video_con_barajar/), 'vídeo + barajar preguntas: no se puede lanzar');
+const c5 = (await q1(`select lanzar_sesion($1) c`, [s5])).c;
+await comoAnon();
+const j5 = await unirse(c5, 'u100', pinDe.u100);
+ok(j5.preguntas[1].video_s === 12 && j5.preguntas[2].imagen === IMG2 && !('video' in j5.preguntas[1]),
+  'el móvil recibe la imagen y cuánto dura el vídeo, no el vídeo');
+await comoProfe();
+const v5 = (await q1(`select iniciar_sesion($1, 0) r`, [s5])).r.ventanas;
+const rel = (x) => Math.round((Date.parse(x) - Date.parse(v5[0].abierta_en)) / 1000);
+ok(rel(v5[0].cierra_en) === 20 && rel(v5[1].abierta_en) === 37 && rel(v5[1].cierra_en) === 57 && rel(v5[2].abierta_en) === 62,
+  `calendario fijo: el vídeo de 12 s retrasa su pregunta y las siguientes (${v5.map((x) => rel(x.abierta_en)).join(', ')})`);
+const s7 = (await q1(`insert into sesiones (grupo_id, titulo, modo, tiempo_s, barajar_preguntas)
+  values ($1, 'Manual vídeo', 'manual', 20, false) returning id`, [g])).id;
+await q(`select asignar_preguntas($1, $2::uuid[])`, [s7, [pv, pregs[0], pi]]);
+await q(`select lanzar_sesion($1)`, [s7]);
+const i7 = (await q1(`select iniciar_sesion($1, 0) r`, [s7])).r;
+ok(Math.round((Date.parse(i7.ventanas[0].abierta_en) - Date.parse(i7.inicio)) / 1000) === 12, 'manual: la primera pregunta abre tras su vídeo');
+await q(`select abrir_pregunta($1, 1::smallint)`, [s7]);
+const a7 = await q1(`select abierta_en <= now() + interval '1 second' ok from sesion_preguntas where sesion_id = $1 and posicion = 1`, [s7]);
+ok(a7.ok, 'manual: pregunta sin vídeo abre al momento');
+const SOBRA = `${'c'.repeat(64)}.mp4`;
+const subir = (nombre, bytes) => q(`insert into storage.objects (bucket_id, name, metadata) values ('medios', $1, $2)`,
+  [nombre, JSON.stringify({ size: bytes })]);
+await subir(IMG, 90000);
+await subir(SOBRA, 5000000);
+const uso = await q(`select * from medios_uso() order by nombre`);
+ok(uso.length === 2 && uso[0].en_uso === true && uso[1].nombre === SOBRA && uso[1].en_uso === false && Number(uso[1].bytes) === 5000000,
+  'medios_uso: tamaño y si alguna pregunta o sesión lo usa');
+await comoAdmin();
+const bucket = await q1(`select public, file_size_limit from storage.buckets where id = 'medios'`);
+ok(bucket.public === true && Number(bucket.file_size_limit) === 20971520, 'bucket medios: público y 20 MB por archivo');
+await comoOtro();
+ok(await falla(`insert into storage.objects (bucket_id, name) values ('medios', 'x.webp')`, [], /row-level security/), 'Storage: no profesor no sube');
+ok((await q(`select * from storage.objects`)).length === 0, 'Storage: no profesor no lista');
+await comoAnon();
+ok(await falla(`insert into storage.objects (bucket_id, name) values ('medios', 'x.webp')`, [], /row-level security/), 'Storage: anon no sube');
+ok(await falla(`select * from medios_uso()`, [], /permission denied/), 'anon: medios_uso -> permission denied');
 
 console.log(fallos ? `\n${fallos} FALLOS` : '\nTodo OK');
 process.exit(fallos ? 1 : 0);

@@ -28,6 +28,27 @@ Profesores: el primer usuario de Supabase Auth y los emails de `profesores_invit
 4. Importación (Moodle XML, CSV, JSON) y exportación a Moodle — `js/importar.js` ✅
 5. Pruebas de caída de red ✅ (modo avión, recarga sin red, reenvío al reconectar; pruebas E2E fuera del repo)
 
+## Imágenes y vídeos
+
+En el editor de cada pregunta (*Preguntas → Editar*):
+
+- **Imagen**: se ve en el móvil y en el proyector, junto a las opciones. Se reduce en el navegador antes de subir (WebP, 1280 px como mucho, unos 30-150 KB).
+  El móvil la descarga al entrar en la sesión, así que se ve aunque se caiga la red.
+- **Vídeo**: solo en el proyector, **antes** de poder responder. Mientras tanto el móvil dice "Mira el proyector" con la cuenta atrás.
+  Cuando acaba, empieza el tiempo de respuesta normal. En calendario fijo, esa pregunta dura lo que dure el vídeo de más.
+  - *Clip propio* (mp4/webm, máx. 20 MB): mejor ya cortado y en 720p.
+  - *YouTube*: enlace + segundo de inicio y de fin. No ocupa espacio, pero el proyector necesita internet.
+  - Tramo máximo: 180 s. Una sesión con vídeos no puede barajar el orden de las preguntas (todos ven el mismo vídeo a la vez).
+
+### Plan gratuito de Supabase
+
+1 GB de archivos y 5 GB de descarga al mes. Para no agotarlo:
+
+- Los archivos se guardan con el sha256 de su contenido como nombre: lo repetido no se sube dos veces y, como no cambian nunca, cada móvil guarda las imágenes para siempre (service worker) y no las vuelve a bajar en otras sesiones.
+- Los vídeos solo los descarga el proyector, una vez por sesión, y los reproduce de memoria. Los móviles nunca bajan vídeo.
+- *Preguntas* muestra el espacio usado ("X MB de 1 GB"). Al borrar o cambiar una imagen o un vídeo, o al borrar preguntas, sesiones o grupos, se borran solos los archivos que ya no usa nadie.
+  Las sesiones hechas conservan sus archivos aunque borres la pregunta del banco.
+
 ## Notas y clasificación
 
 - Cada pregunta tiene **siempre 5 opciones** (A-E) y una sola correcta.
