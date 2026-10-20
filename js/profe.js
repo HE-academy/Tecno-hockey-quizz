@@ -274,8 +274,6 @@ async function vistaNuevaSesion() {
           <div class="campo"><label for="tiempo">Segundos por pregunta</label><input id="tiempo" type="number" min="5" max="300" value="20"></div>
           <div class="campo"><label for="pausa">Pausa entre preguntas (s)</label><input id="pausa" type="number" min="0" max="120" value="8"></div>
         </div>
-        <div class="campo"><label for="pen">Penalización por error</label>
-          <select id="pen"><option value="0.25">−0,25 por error</option><option value="0">Sin penalización</option></select></div>
         <label class="check"><input type="checkbox" id="bar-preg"> Barajar el orden de las preguntas por alumno (solo calendario fijo)</label>
         <label class="check"><input type="checkbox" id="bar-op" checked> Barajar el orden de las opciones por alumno</label>
         <p class="ayuda">Con preguntas barajadas el proyector no puede enseñar la pregunta en curso ni la correcta hasta el final,
@@ -365,7 +363,8 @@ async function vistaNuevaSesion() {
         modo,
         tiempo_s: Number($f.querySelector('#tiempo').value) || 20,
         pausa_s: Number($f.querySelector('#pausa').value) || 0,
-        penalizacion: Number($f.querySelector('#pen').value),
+        // Penalización retirada de momento (20-10-2026): los errores no restan.
+        penalizacion: 0,
         barajar_preguntas: modo === 'fijo' && $f.querySelector('#bar-preg').checked,
         barajar_opciones: $f.querySelector('#bar-op').checked,
       }).select('id').single());

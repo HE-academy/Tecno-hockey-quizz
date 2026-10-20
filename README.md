@@ -52,7 +52,7 @@ En el editor de cada pregunta (*Preguntas → Editar*):
 ## Notas y clasificación
 
 - Cada pregunta tiene **siempre 5 opciones** (A-E) y una sola correcta.
-- **Nota del día** (0-10) = 10 × (aciertos − penalización × errores) / nº preguntas, mínimo 0. Penalización 0 o 0,25 por sesión.
+- **Nota del día** (0-10) = 10 × (aciertos − penalización × errores) / nº preguntas, mínimo 0. Penalización 0 o 0,25 por sesión; de momento la app crea todas las sesiones sin penalización (opción retirada del formulario).
 - **Registro test a test**: al finalizar cada sesión se guarda una fila por alumno en `notas` (nota, aciertos, errores, en blanco, tardías, puntos).
   Si después anulas una respuesta, corriges la clave o llega una respuesta sincronizada tarde, se recalcula sola.
   Quien no entra queda como *no presentado* (sin nota, no 0).
