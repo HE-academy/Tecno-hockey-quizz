@@ -4,11 +4,20 @@
 
 const NOMBRE = 'tecno-hockey-quizz';
 const VERSION = 1;
+// En iPhone, IndexedDB a veces se queda colgado o pierde la conexión al volver
+// de otra app ("Connection to Indexed Database server lost"). Nada puede
+// esperarlo para siempre: pasado este tiempo, la operación falla.
+const LIMITE_MS = 1500;
 let conexion = null;
+
+const conLimite = (promesa) => Promise.race([
+  promesa,
+  new Promise((_, reject) => setTimeout(() => reject(new Error('indexeddb_timeout')), LIMITE_MS)),
+]);
 
 function abrir() {
   if (conexion) return conexion;
-  conexion = new Promise((resolve, reject) => {
+  conexion = conLimite(new Promise((resolve, reject) => {
     const req = indexedDB.open(NOMBRE, VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
@@ -18,21 +27,35 @@ function abrir() {
         cola.createIndex('sesion', 'sesion_id');
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => { conexion = null; reject(req.error); };
-  });
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onclose = () => { conexion = null; };
+      db.onversionchange = () => { db.close(); conexion = null; };
+      resolve(db);
+    };
+    req.onerror = () => reject(req.error);
+  }));
+  conexion.catch(() => { conexion = null; });
   return conexion;
 }
 
-async function tx(almacen, modo, fn) {
-  const db = await abrir();
-  return new Promise((resolve, reject) => {
-    const t = db.transaction(almacen, modo);
-    const resultado = fn(t.objectStore(almacen));
-    t.oncomplete = () => resolve(resultado instanceof IDBRequest ? resultado.result : resultado);
-    t.onerror = () => reject(t.error);
-    t.onabort = () => reject(t.error);
-  });
+// Si la conexión estaba muerta, se reabre una vez. Repetir es seguro: put y
+// delete son idempotentes.
+async function tx(almacen, modo, fn, reintento = true) {
+  try {
+    const db = await abrir();
+    return await conLimite(new Promise((resolve, reject) => {
+      const t = db.transaction(almacen, modo);
+      const resultado = fn(t.objectStore(almacen));
+      t.oncomplete = () => resolve(resultado instanceof IDBRequest ? resultado.result : resultado);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    }));
+  } catch (e) {
+    conexion = null;
+    if (!reintento) throw e;
+    return tx(almacen, modo, fn, false);
+  }
 }
 
 export const kv = {

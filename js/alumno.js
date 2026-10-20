@@ -43,7 +43,9 @@ const lsGet = (k) => { try { return JSON.parse(localStorage.getItem(k)); } catch
 const lsSet = (k, v) => {
   try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch { /* modo privado */ }
 };
-const guardar = () => kv.set('sesion', r);
+// Guardar en el móvil solo sirve para sobrevivir a una recarga: si falla, el
+// cuestionario sigue en memoria y no se para nada.
+const guardar = () => kv.set('sesion', r).catch(() => {});
 const nota2 = (n) => Number(n).toLocaleString('es-ES', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 
 // ---------------------------------------------------------------- conexión
@@ -77,8 +79,34 @@ let otraVuelta = false;
 let reintento = null;
 let espera = 1000;
 
+// Respuestas que no se pudieron escribir en IndexedDB. Se envían igual; solo
+// se pierden si además se cierra la app antes de que salgan.
+const enMemoria = new Map();
+
+async function todasLasRespuestas() {
+  let disco = [];
+  try { disco = await cola.todas(); } catch { /* IndexedDB caído: solo memoria */ }
+  const porId = new Map(disco.map((i) => [i.id, i]));
+  enMemoria.forEach((i, id) => porId.set(id, i));
+  return [...porId.values()];
+}
+
+async function persistir(item) {
+  try {
+    await cola.poner(item);
+    enMemoria.delete(item.id);
+  } catch {
+    enMemoria.set(item.id, item);
+  }
+}
+
+async function tokenDe(item) {
+  if (r?.sesion.id === item.sesion_id) return r.token;
+  try { return await kv.get(`token:${item.sesion_id}`); } catch { return null; }
+}
+
 async function contarPendientes() {
-  const todas = await cola.todas();
+  const todas = await todasLasRespuestas();
   pendientes = todas.filter((i) => i.estado === 'pendiente' || i.estado === 'sin_token').length;
   if (r) {
     estadoCola.clear();
@@ -94,9 +122,9 @@ async function sincronizar() {
   sincronizando = true;
   clearTimeout(reintento);
   try {
-    const items = (await cola.todas()).filter((i) => i.estado === 'pendiente');
+    const items = (await todasLasRespuestas()).filter((i) => i.estado === 'pendiente');
     for (const item of items) {
-      const token = await kv.get(`token:${item.sesion_id}`);
+      const token = await tokenDe(item);
       try {
         const res = await rpc('enviar_respuesta', {
           p_token: token, p_posicion: item.posicion, p_opcion: item.opcion, p_t_respuesta: item.t_respuesta,
@@ -121,7 +149,7 @@ async function sincronizar() {
         }
       }
       item.intentos = (item.intentos || 0) + 1;
-      await cola.poner(item);
+      await persistir(item);
       marcarConexion(true);
     }
     espera = 1000;
@@ -336,11 +364,11 @@ async function responder(turno, boton) {
     estado: 'pendiente',
     intentos: 0,
   };
-  // Primero al disco: si el móvil se apaga ahora, la respuesta sobrevive.
-  await cola.poner(item);
+  // Primero se marca y luego se guarda: antes se esperaba a IndexedDB y, si se
+  // colgaba (iPhone al volver de otra app), el toque no hacía nada.
   estadoCola.set(p.posicion, item);
+  enMemoria.set(item.id, item);
   r.elegidas[p.posicion] = boton;
-  await guardar();
   navigator.vibrate?.(30);
   const $ops = document.getElementById('opciones');
   if ($ops) {
@@ -353,7 +381,10 @@ async function responder(turno, boton) {
   pendientes += 1;
   pintarConexion();
   pintarEstadoRespuesta();
+  // Se envía ya; el guardado en el móvil va detrás y no retrasa el envío.
   sincronizar();
+  await persistir(item);
+  await guardar();
 }
 
 function pintarPausa(f) {
@@ -627,15 +658,15 @@ async function dentro(res, codigo, idAlumno, pin, recordar, desfase) {
   };
   await guardar();
   precargarImagenes(res.preguntas);
-  await kv.set(`token:${res.sesion.id}`, res.token);
+  await kv.set(`token:${res.sesion.id}`, res.token).catch(() => {});
   lsSet(LS_TOKEN, res.token);
   // undefined = no tocar lo recordado (reentrada desde la pantalla de PIN).
   if (recordar === true) lsSet(LS_CRED, { id_alumno: idAlumno, pin });
   else if (recordar === false) lsSet(LS_CRED, null);
 
   // Respuestas que se quedaron sin token válido: ya se pueden enviar.
-  for (const item of await cola.deSesion(res.sesion.id)) {
-    if (item.estado === 'sin_token') { item.estado = 'pendiente'; await cola.poner(item); }
+  for (const item of (await todasLasRespuestas()).filter((i) => i.sesion_id === res.sesion.id)) {
+    if (item.estado === 'sin_token') { item.estado = 'pendiente'; await persistir(item); }
   }
   arrancar();
 }
@@ -673,7 +704,7 @@ async function salir() {
   clearTimeout(sondeo);
   liberarPantalla();
   // La cola no se borra: lo pendiente se sigue enviando con su token.
-  await kv.del('sesion');
+  await kv.del('sesion').catch(() => {});
   const codigo = r?.sesion.estado === 'finalizada' ? '' : r?.codigo;
   r = null;
   resultadoFinal = null;
