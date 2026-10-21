@@ -137,8 +137,20 @@ r = (await q1(`select enviar_respuesta($1, 1::smallint, 7::smallint, now()) r`, 
 ok(!r.ok && r.error === 'opcion', 'opción inexistente rechazada');
 r = (await q1(`select enviar_respuesta($1, 2::smallint, 2::smallint, now()) r`, [tokA])).r;
 ok(!r.ok && r.error === 'no_abierta', 'turno futuro aún no abierto -> no_abierta, no se guarda');
-// B responde turno 0 mal
+await comoAdmin();
+const antes = await q(`select posicion, abierta_en, cierra_en from sesion_preguntas where sesion_id = $1 order by posicion`, [s]);
+await comoAnon();
+// B responde turno 0 mal: ya han respondido los dos unidos (Carla está bloqueada)
 await q(`select enviar_respuesta($1, 0::smallint, 1::smallint, now())`, [tokB]);
+await comoAdmin();
+const tras = await q(`select posicion, abierta_en, cierra_en from sesion_preguntas where sesion_id = $1 order by posicion`, [s]);
+const adelanto = antes[0].cierra_en - tras[0].cierra_en;
+ok(adelanto > 15000 && tras[0].cierra_en <= new Date(), `responden todos -> turno 0 cerrado ya (${Math.round(adelanto / 1000)} s antes)`);
+ok(tras.slice(1).every((x, i) => antes[i + 1].abierta_en - x.abierta_en === adelanto && antes[i + 1].cierra_en - x.cierra_en === adelanto),
+  'modo fijo: el resto del calendario se adelanta lo mismo (la pausa se mantiene)');
+await comoAnon();
+r = (await q1(`select enviar_respuesta($1, 1::smallint, 2::smallint, now()) r`, [tokB])).r;
+ok(!r.ok && r.error === 'no_abierta', 'tras el cierre anticipado el turno 1 aún no está abierto (pausa)');
 
 let mr = (await q1(`select mi_resultado($1) r`, [tokA])).r;
 ok(mr.preguntas[0].revelada === false && !('correcta' in mr.preguntas[0]) && mr.nota === null, 'mi_resultado: nada revelado durante la pregunta');
@@ -146,14 +158,14 @@ ok(mr.preguntas[0].revelada === false && !('correcta' in mr.preguntas[0]) && mr.
 // --- Simular paso del tiempo: retrasar 2 minutos todo el calendario
 await comoAdmin();
 await db.exec(`update sesion_preguntas set abierta_en = abierta_en - interval '2 minutes', cierra_en = cierra_en - interval '2 minutes' where sesion_id = '${s}'`);
-// Ventanas ahora (aprox.): t0 [-120,-100], t1 [-95,-75], t2 [-70,-50], t3 [-45,-25] s
+// Ventanas ahora (aprox., con el turno 0 cerrado 20 s antes): t0 [-120,-120], t1 [-115,-95], t2 [-90,-70], t3 [-65,-45] s
 
 await comoAnon();
-// A estuvo sin red: contestó t1 dentro de su ventana (t=-85 s), llega ahora -> aceptada y marcada tarde
-r = (await q1(`select enviar_respuesta($1, 1::smallint, 1::smallint, now() - interval '85 seconds') r`, [tokA])).r;
+// A estuvo sin red: contestó t1 dentro de su ventana (t=-105 s), llega ahora -> aceptada y marcada tarde
+r = (await q1(`select enviar_respuesta($1, 1::smallint, 1::smallint, now() - interval '105 seconds') r`, [tokA])).r;
 ok(r.ok && r.estado === 'registrada', 'sin conexión: respuesta en ventana llega tarde -> registrada');
-// t2 contestada fuera de plazo (t=-40 s, cierre -50 s)
-r = (await q1(`select enviar_respuesta($1, 2::smallint, 2::smallint, now() - interval '40 seconds') r`, [tokA])).r;
+// t2 contestada fuera de plazo (t=-60 s, cierre -70 s)
+r = (await q1(`select enviar_respuesta($1, 2::smallint, 2::smallint, now() - interval '60 seconds') r`, [tokA])).r;
 ok(r.ok && r.estado === 'fuera_de_tiempo', 'fuera de ventana -> fuera_de_tiempo');
 // reloj del móvil en el futuro
 r = (await q1(`select enviar_respuesta($1, 3::smallint, 3::smallint, now() + interval '1 hour') r`, [tokB])).r;
@@ -200,7 +212,7 @@ await anular(false);
 ok(Number((await regNota('u100')).nota) === 5, 'desanular -> vuelve a 5');
 
 await comoAnon();
-r = (await q1(`select enviar_respuesta($1, 2::smallint, 0::smallint, now() - interval '60 seconds') r`, [tokB])).r;
+r = (await q1(`select enviar_respuesta($1, 2::smallint, 0::smallint, now() - interval '80 seconds') r`, [tokB])).r;
 ok(r.ok && r.estado === 'registrada', 'Bru sincroniza tarde tras finalizar -> registrada');
 ok(await falla(`select * from notas`, [], /permission denied/), 'anon: notas -> permission denied');
 await comoProfe();
@@ -308,6 +320,29 @@ await q(`select quitar_pin($1)`, [idLaia]);
 await comoAnon();
 ok((await unirse(c4, 'm200', '4321')).error === 'sin_pin', 'profe quita el PIN -> vuelve a elegirlo');
 ok((await elegir(c4, 'm200', '8888')).ok, 'elige uno nuevo y entra');
+
+// Modo manual: la pregunta se cierra en cuanto responde el último unido
+await comoProfe();
+const s8 = (await q1(`insert into sesiones (grupo_id, titulo, modo, tiempo_s, barajar_preguntas)
+  values ($1, 'Manual todos', 'manual', 60, false) returning id`, [g4])).id;
+await q(`select asignar_preguntas($1, $2::uuid[])`, [s8, pregs.slice(0, 2)]);
+const c8 = (await q1(`select lanzar_sesion($1) c`, [s8])).c;
+await comoAnon();
+const tLaia = (await unirse(c8, 'm200', '8888')).token, tMarc = (await unirse(c8, 'm201', '5555')).token;
+await comoProfe();
+await q(`select iniciar_sesion($1, 0)`, [s8]);
+const abierta8 = async () => (await q1(`select cierra_en > now() + interval '30 seconds' a from sesion_preguntas where sesion_id = $1 and posicion = 0`, [s8])).a;
+await comoAnon();
+await q(`select enviar_respuesta($1, 0::smallint, 0::smallint, now())`, [tLaia]);
+await comoProfe();
+ok(await abierta8(), 'manual: falta uno por responder -> la pregunta sigue abierta');
+await comoAnon();
+await q(`select enviar_respuesta($1, 0::smallint, 2::smallint, now())`, [tMarc]);
+await comoProfe();
+ok(!(await abierta8()), 'manual: responde el último -> la pregunta se cierra ya');
+ok((await q1(`select count(*)::int n from sesion_preguntas where sesion_id = $1 and abierta_en is not null`, [s8])).n === 1,
+  'manual: la siguiente no se abre sola (la abre el profesor)');
+ok((await q1(`select turno_actual t, cierra_en <= now() c from sesiones_vivo where sesion_id = $1`, [s8])).c, 'manual: sesiones_vivo publica el cierre');
 
 // Medios: imagen (móvil y proyector) y vídeo (solo proyector, antes de responder)
 await comoProfe();

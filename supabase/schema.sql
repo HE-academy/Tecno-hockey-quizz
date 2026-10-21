@@ -434,6 +434,40 @@ begin
 end;
 $$;
 
+-- Si ya han respondido todos los que se han unido a la sesión, el turno se
+-- cierra en el acto. En modo fijo el resto del calendario se adelanta lo
+-- mismo, así la pausa y los vídeos siguientes duran lo que tienen que durar.
+create function public._cerrar_si_respondieron_todos(p_sesion uuid, p_turno smallint) returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_cierra timestamptz;
+  v_ahora timestamptz;
+begin
+  -- Bloquea el turno: si los dos últimos responden a la vez, el segundo
+  -- espera al primero y ya cuenta su respuesta.
+  select cierra_en into v_cierra from public.sesion_preguntas
+  where sesion_id = p_sesion and posicion = p_turno for update;
+  v_ahora := clock_timestamp();
+  if v_cierra is null or v_cierra <= v_ahora then
+    return;
+  end if;
+  if (select count(*) from public.respuestas where sesion_id = p_sesion and turno = p_turno)
+     < (select count(*) from public.participaciones where sesion_id = p_sesion) then
+    return;
+  end if;
+  if (select modo from public.sesiones where id = p_sesion) = 'fijo' then
+    update public.sesion_preguntas
+       set abierta_en = abierta_en - (v_cierra - v_ahora),
+           cierra_en  = cierra_en - (v_cierra - v_ahora)
+     where sesion_id = p_sesion and posicion > p_turno and abierta_en is not null;
+  end if;
+  update public.sesion_preguntas set cierra_en = v_ahora
+   where sesion_id = p_sesion and posicion = p_turno;
+  perform public._publicar_vivo(p_sesion);
+end;
+$$;
+
 create function public._participacion(p_token text) returns public.participaciones
 language plpgsql security definer set search_path = ''
 as $$
@@ -746,6 +780,9 @@ begin
 
   if v_id is null then
     return jsonb_build_object('ok', true, 'duplicada', true);
+  end if;
+  if v_aceptada then
+    perform public._cerrar_si_respondieron_todos(s.id, v_turno::smallint);
   end if;
   return jsonb_build_object('ok', true,
     'estado', case when v_aceptada then 'registrada' else 'fuera_de_tiempo' end);

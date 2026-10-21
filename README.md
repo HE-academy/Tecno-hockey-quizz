@@ -15,6 +15,7 @@ Los alumnos responden desde el móvil con tiempo por pregunta. Cada sesión da u
 1. **Preguntas** → Importar tu banco (Moodle XML, CSV `enunciado;A;B;C;D;E;correcta;explicacion;etiquetas` o JSON). Siempre 5 opciones. Ejemplo: `preguntas_ejemplo.csv`.
 2. **Sesiones → Nueva sesión**: grupo, modo (calendario fijo en pista / manual), tiempo y pausa, preguntas a mano o N al azar de una etiqueta → *Guardar y lanzar*.
 3. **Proyector**: QR + código. Los alumnos entran (la primera vez se registran: nombre, apellidos, email de TecnoCampus y PIN; reciben un id de 6 cifras para siempre). Pulsa *Empezar*.
+   En cuanto han respondido todos los que han entrado, la pregunta se cierra sin esperar al reloj (en calendario fijo se adelanta todo lo que viene detrás). Si alguien entró y dejó el móvil, se espera al reloj.
 4. Al acabar, *Terminar y guardar notas*: ranking del día y clasificación del grupo.
 5. **Notas**: por sesión (revisar respuestas sincronizadas tarde), trimestre (descartar peores, ausencias como 0) → *Exportar CSV para Moodle*.
 

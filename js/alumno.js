@@ -197,6 +197,8 @@ function programarSondeo() {
   const f = fase();
   let ms = 15000;
   if (f.tipo === 'espera' || (f.tipo === 'pausa' && !f.hasta)) ms = 3000;
+  // Ya respondida: la pregunta se cierra antes si responden todos (servidor).
+  if (f.tipo === 'pregunta' && respondida(preguntaDeTurno(f.turno).posicion)) ms = 2000;
   if (f.tipo === 'final') {
     if (resultadoFinal?.nota != null && !pendientes) return;
     ms = 8000;
@@ -383,6 +385,7 @@ async function responder(turno, boton) {
   pintarEstadoRespuesta();
   // Se envía ya; el guardado en el móvil va detrás y no retrasa el envío.
   sincronizar();
+  programarSondeo();
   await persistir(item);
   await guardar();
 }
