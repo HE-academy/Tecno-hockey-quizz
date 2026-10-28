@@ -101,11 +101,10 @@ ok(await falla(`select _participacion('x')`, [], /permission denied/), 'anon: fu
 ok(await falla(`insert into sesiones_vivo (sesion_id, estado, modo) values ($1,'x','x')`, [s], /permission denied/), 'anon: no escribe sesiones_vivo');
 ok((await q(`select * from sesiones_vivo`)).length === 1, 'anon: lee sesiones_vivo');
 
-const malo = (await q1(`select unirse_sesion($1,'u100','0000') r`, [codigo])).r;
-ok(!malo.ok && malo.error === 'credenciales', 'PIN incorrecto -> credenciales');
-for (let i = 0; i < 5; i++) await q(`select unirse_sesion($1,'u102','9999')`, [codigo]);
-const bloq = (await q1(`select unirse_sesion($1,'u102',$2) r`, [codigo, pinDe.u102])).r;
-ok(!bloq.ok && bloq.error === 'bloqueado', '5 fallos -> bloqueado aunque luego acierte');
+const malo = (await q1(`select unirse_sesion($1,'nadie@tecnocampus.cat','') r`, [codigo])).r;
+ok(!malo.ok && malo.error === 'credenciales', 'email que no está en el grupo -> credenciales');
+const sinPin = (await q1(`select unirse_sesion($1,'ANA@tecnocampus.cat',null) r`, [codigo])).r;
+ok(sinPin.ok, 'entrar solo con el email, sin PIN');
 
 const j = (await q1(`select unirse_sesion($1,'u100',$2) r`, [codigo.toLowerCase(), pinDe.u100])).r;
 ok(j.ok && j.token.length === 48, 'unirse_sesion ok (código en minúsculas)');
@@ -140,7 +139,7 @@ ok(!r.ok && r.error === 'no_abierta', 'turno futuro aún no abierto -> no_abiert
 await comoAdmin();
 const antes = await q(`select posicion, abierta_en, cierra_en from sesion_preguntas where sesion_id = $1 order by posicion`, [s]);
 await comoAnon();
-// B responde turno 0 mal: ya han respondido los dos unidos (Carla está bloqueada)
+// B responde turno 0 mal: ya han respondido los dos unidos (Carla no ha entrado)
 await q(`select enviar_respuesta($1, 0::smallint, 1::smallint, now())`, [tokB]);
 await comoAdmin();
 const tras = await q(`select posicion, abierta_en, cierra_en from sesion_preguntas where sesion_id = $1 order by posicion`, [s]);
@@ -274,52 +273,35 @@ ok((await reg([c3, '', 'Roca', 'nil@tecnocampus.cat', '1111'])).error === 'nombr
 ok((await reg(['ZZZZZZ', 'Nil', 'Roca', 'nil@tecnocampus.cat', '1111'])).error === 'codigo', 'registro: código inexistente rechazado');
 const r1 = await reg([c3, '  Nil ', 'Roca  Puig', 'Nil.Roca@Alumnes.TecnoCampus.cat', '1111']);
 ok(r1.ok && /^\d{6}$/.test(r1.nuevo_id) && r1.token && r1.preguntas.length === 2, `registro ok: id ${r1.nuevo_id}, ya dentro de la sesión`);
-const r2 = await reg([c3, 'Nil', 'Roca', 'nil.roca@alumnes.tecnocampus.cat', '2222']);
-ok(!r2.ok && r2.error === 'ya_registrado' && r2.id_alumno === r1.nuevo_id, 'registro repetido: recuerda su id y no crea otro');
-const porEmail = (await q1(`select unirse_sesion($1, 'NIL.ROCA@alumnes.tecnocampus.cat', '1111') r`, [c3])).r;
+const r2 = await reg([c3, 'Nil', 'Roca', 'nil.roca@alumnes.tecnocampus.cat', '']);
+ok(r2.ok && r2.nuevo_id === r1.nuevo_id && r2.token, 'registro repetido: entra con su ficha y no crea otra');
+const porEmail = (await q1(`select unirse_sesion($1, 'NIL.ROCA@alumnes.tecnocampus.cat', '') r`, [c3])).r;
 ok(porEmail.ok, 'entrar con el email en vez del id');
 await comoProfe();
 const nil = await q1(`select nombre, apellidos, email from alumnos where id_alumno = $1`, [r1.nuevo_id]);
 ok(nil.nombre === 'Nil' && nil.apellidos === 'Roca Puig' && nil.email === 'nil.roca@alumnes.tecnocampus.cat', 'nombre y email normalizados');
 
-// Alumnos importados sin PIN: lo eligen ellos al entrar por primera vez
+// Alumnos importados por el profesor: entran con su email, sin PIN
 const g4 = (await q1(`insert into grupos (nombre) values ('Importados') returning id`)).id;
 await q(`insert into alumnos (grupo_id, id_alumno, nombre, apellidos, email) values
   ($1,'m200','Laia','Serra','laia@tecnocampus.cat'),
   ($1,'m201','Marc','Font','marc@tecnocampus.cat')`, [g4]);
-const idLaia = (await q1(`select id from alumnos where id_alumno = 'm200'`)).id;
 const s4 = (await q1(`insert into sesiones (grupo_id, titulo) values ($1, 'Clase 4') returning id`, [g4])).id;
 await q(`select asignar_preguntas($1, $2::uuid[])`, [s4, pregs.slice(0, 2)]);
 const c4 = (await q1(`select lanzar_sesion($1) c`, [s4])).c;
 await comoAnon();
 const unirse = (cod, id, pin) => q1(`select unirse_sesion($1, $2, $3) r`, [cod, id, pin]).then((x) => x.r);
-const elegir = (cod, id, pin) => q1(`select elegir_pin($1, $2, $3) r`, [cod, id, pin]).then((x) => x.r);
-const sinPin = await unirse(c4, 'LAIA@tecnocampus.cat', '');
-ok(!sinPin.ok && sinPin.error === 'sin_pin' && sinPin.nombre === 'Laia S.', 'importada sin PIN: entrar con email -> sin_pin con nombre corto');
-ok((await unirse(c4, 'm200', '1234')).error === 'sin_pin', 'sin PIN: cualquier PIN -> sin_pin, no credenciales');
-ok((await elegir(c4, 'laia@tecnocampus.cat', '12a4')).error === 'pin', 'elegir_pin: PIN mal formado rechazado');
-ok((await elegir('ZZZZZZ', 'laia@tecnocampus.cat', '4321')).error === 'codigo', 'elegir_pin: sin sesión abierta rechazado');
-ok((await elegir(c4, 'nadie@tecnocampus.cat', '4321')).error === 'credenciales', 'elegir_pin: alumno de otro grupo o inexistente rechazado');
-const el = await elegir(c4, 'laia@tecnocampus.cat', '4321');
-ok(el.ok && el.token && el.alumno.id_alumno === 'm200' && el.preguntas.length === 2, 'elegir_pin ok: ya dentro de la sesión');
-ok((await elegir(c4, 'm200', '0000')).error === 'ya_tiene_pin', 'elegir_pin con PIN ya puesto -> ya_tiene_pin, no lo cambia');
-ok((await unirse(c4, 'laia@tecnocampus.cat', '4321')).ok, 'después entra con email + su PIN');
-ok((await unirse(c4, 'm200', '')).error === 'credenciales', 'con PIN puesto, PIN vacío -> credenciales');
-await comoProfe();
-ok((await q1(`select intentos_fallidos n from alumnos where id = $1`, [idLaia])).n === 0, 'PIN vacío no cuenta como intento fallido');
-await comoAnon();
-const rm = await reg([c4, 'Otro', 'Nombre', 'marc@tecnocampus.cat', '5555']);
-ok(rm.ok && rm.nuevo_id === 'm201' && rm.token, 'registrarse con el email de un importado sin PIN: se queda su ficha con ese PIN');
-ok((await unirse(c4, 'm201', '5555')).ok, 'el importado entra luego con su id y el PIN elegido');
-ok((await reg([c4, 'Marc', 'Font', 'marc@tecnocampus.cat', '6666'])).error === 'ya_registrado', 'segundo registro con ese email -> ya_registrado');
-ok(await falla(`select quitar_pin($1)`, [idLaia], /permission denied/), 'anon: quitar_pin -> permission denied');
+const el = await unirse(c4, 'LAIA@tecnocampus.cat', '');
+ok(el.ok && el.token && el.alumno.id_alumno === 'm200' && el.preguntas.length === 2, 'importada: entra con su email, ya dentro de la sesión');
+ok((await unirse(c4, 'laia@tecnocampus.cat', '1234')).ok, 'un PIN escrito (versión vieja) se ignora');
+ok((await unirse(c4, 'nadie@tecnocampus.cat', '')).error === 'credenciales', 'email de otro grupo o inexistente -> credenciales');
+ok((await unirse('ZZZZZZ', 'laia@tecnocampus.cat', '')).error === 'codigo', 'sin sesión abierta -> codigo');
+const rm = await reg([c4, 'Otro', 'Nombre', 'marc@tecnocampus.cat', '']);
+ok(rm.ok && rm.nuevo_id === 'm201' && rm.token, 'registrarse con el email de un importado: entra con su ficha');
 await comoProfe();
 const marc = await q1(`select nombre, apellidos from alumnos where id_alumno = 'm201'`);
 ok(marc.nombre === 'Marc' && marc.apellidos === 'Font', 'el registro no pisa el nombre de la lista del profesor');
-await q(`select quitar_pin($1)`, [idLaia]);
 await comoAnon();
-ok((await unirse(c4, 'm200', '4321')).error === 'sin_pin', 'profe quita el PIN -> vuelve a elegirlo');
-ok((await elegir(c4, 'm200', '8888')).ok, 'elige uno nuevo y entra');
 
 // Modo manual: la pregunta se cierra en cuanto responde el último unido
 await comoProfe();

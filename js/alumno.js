@@ -279,8 +279,6 @@ function pintarEspera() {
         Espera a que el profesor empiece.<br>
         ${r.preguntas.length} preguntas · ${r.sesion.tiempo_s} s cada una
       </div>
-      <div class="tarjeta">Tu id de alumno: <strong style="font-size:1.4rem;letter-spacing:.08em">${esc(r.alumno.id_alumno)}</strong><br>
-        <span class="sub">Apúntalo: con él (o tu email) y tu PIN entrarás siempre.</span></div>
       <p class="sub">Las preguntas ya están en tu móvil: si se va la conexión, podrás seguir.</p>
       <button class="btn-link" type="button" data-salir>No soy ${esc(r.alumno.nombre)} · salir</button>
     </section>`;
@@ -514,9 +512,7 @@ function pintarReentrar() {
   $app.innerHTML = `
     <form class="pantalla" id="form-reentrar" novalidate>
       <h1>Vuelve a <b>entrar</b></h1>
-      <p class="sub">Has entrado con tu id desde otro dispositivo. Para seguir en este, escribe otra vez tu PIN.</p>
-      <div class="campo"><label for="pin">PIN</label>
-        <input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off"></div>
+      <p class="sub">Has entrado desde otro dispositivo. ¿Quieres seguir en este?</p>
       <p class="error" id="error" hidden></p>
       <button class="btn bloque" type="submit">Seguir aquí</button>
       <button class="btn-link" type="button" data-salir>Salir de la sesión</button>
@@ -524,10 +520,10 @@ function pintarReentrar() {
   $app.querySelector('[data-salir]').onclick = () => salir();
   $app.querySelector('form').onsubmit = async (e) => {
     e.preventDefault();
-    const err = await entrar(r.codigo, r.alumno.id_alumno, $app.querySelector('#pin').value);
+    const err = await entrar(r.codigo, r.alumno.id_alumno);
     if (err) {
       const $e = $app.querySelector('#error');
-      $e.textContent = err.sinPin !== undefined ? 'El profesor ha reiniciado tu PIN: sal y vuelve a entrar para elegir uno.' : err;
+      $e.textContent = err.noEsta ? 'No se ha podido entrar. Sal y vuelve a entrar.' : err;
       $e.hidden = false;
     }
   };
@@ -546,20 +542,19 @@ function barajar(n) {
   return a;
 }
 
-// Devuelve null si entra, el mensaje de error, o { sinPin } si el profesor lo
-// dio de alta y aún tiene que elegir PIN. El PIN puede ir vacío para eso.
-async function entrar(codigo, idAlumno, pin, recordar) {
+// Se entra solo con el email (un id guardado de antes también vale). Devuelve
+// null si entra, el mensaje de error, o { noEsta } si el email no está en el
+// grupo (primera vez: toca registrarse).
+async function entrar(codigo, idAlumno, recordar) {
   codigo = (codigo || '').trim().toUpperCase();
   idAlumno = (idAlumno || '').trim();
-  pin = (pin || '').trim();
   if (!/^[A-Z2-9]{6}$/.test(codigo)) return 'El código tiene 6 caracteres (letras y números).';
-  if (!idAlumno) return 'Escribe tu id o tu email.';
-  if (pin && !/^\d{4}$/.test(pin)) return 'El PIN son 4 cifras.';
+  if (!idAlumno) return 'Escribe tu email de TecnoCampus.';
   let res;
   let desfase = 0;
   try {
     desfase = (await medirDesfase()).desfase;
-    res = await rpc('unirse_sesion', { p_codigo: codigo, p_id_alumno: idAlumno, p_pin: pin });
+    res = await rpc('unirse_sesion', { p_codigo: codigo, p_id_alumno: idAlumno, p_pin: '' });
   } catch (e) {
     marcarConexion(false);
     return e instanceof ErrorRed
@@ -569,56 +564,24 @@ async function entrar(codigo, idAlumno, pin, recordar) {
   marcarConexion(true);
   if (!res.ok) {
     if (res.error === 'codigo') return 'No hay ninguna sesión abierta con ese código.';
-    if (res.error === 'bloqueado') {
-      const hora = new Date(aMs(res.hasta)).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
-      return `Demasiados intentos con PIN incorrecto. Prueba otra vez a las ${hora}.`;
-    }
-    if (res.error === 'sin_pin') return { sinPin: res.nombre };
-    return pin ? 'Id (o email) o PIN incorrectos.' : 'Escribe tu PIN.';
+    return { noEsta: true };
   }
-  await dentro(res, codigo, idAlumno, pin, recordar, desfase);
-  return null;
-}
-
-// Primer acceso de un alumno dado de alta por el profesor: null si entra,
-// { error } para repetir, o { volver } para regresar a la entrada.
-async function elegirPin(codigo, idAlumno, pin, pin2, recordar) {
-  if (!/^\d{4}$/.test(pin)) return { error: 'El PIN son 4 cifras.' };
-  if (pin !== pin2) return { error: 'Los dos PIN no coinciden.' };
-  let res;
-  let desfase = 0;
-  try {
-    desfase = (await medirDesfase()).desfase;
-    res = await rpc('elegir_pin', { p_codigo: codigo, p_id_alumno: idAlumno, p_pin: pin });
-  } catch (e) {
-    marcarConexion(false);
-    return { error: e instanceof ErrorRed ? 'Sin conexión. Para elegir el PIN hace falta internet.' : 'No se ha podido guardar el PIN.' };
-  }
-  marcarConexion(true);
-  if (!res.ok) {
-    if (res.error === 'pin') return { error: 'El PIN son 4 cifras.' };
-    if (res.error === 'ya_tiene_pin') return { volver: 'Ya tienes PIN: entra con él. Si no lo elegiste tú, avisa al profesor.' };
-    if (res.error === 'codigo') return { volver: 'No hay ninguna sesión abierta con ese código.' };
-    return { volver: 'No se ha podido entrar. Revisa tu id o email.' };
-  }
-  await dentro(res, codigo, idAlumno, pin, recordar, desfase);
+  await dentro(res, codigo, idAlumno, recordar, desfase);
   return null;
 }
 
 // Alta del alumno nuevo: devuelve null si entra, o el mensaje de error.
-async function registrar(codigo, nombre, apellidos, email, pin, pin2) {
+async function registrar(codigo, nombre, apellidos, email) {
   codigo = (codigo || '').trim().toUpperCase();
   if (!/^[A-Z2-9]{6}$/.test(codigo)) return { error: 'El código de la sesión tiene 6 caracteres: míralo en el proyector.' };
   if (!nombre.trim() || !apellidos.trim()) return { error: 'Escribe tu nombre y tus apellidos.' };
   if (!/^[^@\s]+@([a-z0-9-]+\.)*tecnocampus\.cat$/i.test(email.trim())) return { error: 'Usa tu email de TecnoCampus (…@tecnocampus.cat).' };
-  if (!/^\d{4}$/.test(pin)) return { error: 'El PIN son 4 cifras.' };
-  if (pin !== pin2) return { error: 'Los dos PIN no coinciden.' };
   let res;
   let desfase = 0;
   try {
     desfase = (await medirDesfase()).desfase;
     res = await rpc('registrar_alumno', {
-      p_codigo: codigo, p_nombre: nombre, p_apellidos: apellidos, p_email: email, p_pin: pin,
+      p_codigo: codigo, p_nombre: nombre, p_apellidos: apellidos, p_email: email, p_pin: '',
     });
   } catch (e) {
     marcarConexion(false);
@@ -630,17 +593,15 @@ async function registrar(codigo, nombre, apellidos, email, pin, pin2) {
       codigo: 'No hay ninguna sesión abierta con ese código.',
       nombre: 'Escribe tu nombre y tus apellidos.',
       email: 'Usa tu email de TecnoCampus (…@tecnocampus.cat).',
-      pin: 'El PIN son 4 cifras.',
       grupo_lleno: 'El grupo está completo. Avisa al profesor.',
     };
-    if (res.error === 'ya_registrado') return { yaRegistrado: res.id_alumno };
     return { error: mensajes[res.error] || 'No se ha podido completar el registro.' };
   }
-  await dentro(res, codigo, res.nuevo_id, pin, true, desfase);
+  await dentro(res, codigo, email.trim().toLowerCase(), true, desfase);
   return null;
 }
 
-async function dentro(res, codigo, idAlumno, pin, recordar, desfase) {
+async function dentro(res, codigo, idAlumno, recordar, desfase) {
   const anterior = r?.sesion.id === res.sesion.id ? r : null;
   const perms = anterior?.perms || {};
   for (const p of res.preguntas) {
@@ -663,8 +624,8 @@ async function dentro(res, codigo, idAlumno, pin, recordar, desfase) {
   precargarImagenes(res.preguntas);
   await kv.set(`token:${res.sesion.id}`, res.token).catch(() => {});
   lsSet(LS_TOKEN, res.token);
-  // undefined = no tocar lo recordado (reentrada desde la pantalla de PIN).
-  if (recordar === true) lsSet(LS_CRED, { id_alumno: idAlumno, pin });
+  // undefined = no tocar lo recordado (reentrada desde otro dispositivo).
+  if (recordar === true) lsSet(LS_CRED, { id_alumno: idAlumno });
   else if (recordar === false) lsSet(LS_CRED, null);
 
   // Respuestas que se quedaron sin token válido: ya se pueden enviar.
@@ -739,24 +700,16 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
           <input id="codigo" class="codigo-input" inputmode="text" maxlength="6" autocapitalize="characters"
                  spellcheck="false" value="${esc(codigo)}" placeholder="ABC234">
         </div>
-        <div class="fila">
-          <div class="campo">
-            <label for="id-alumno">Id o email</label>
-            <input id="id-alumno" type="text" autocapitalize="none" spellcheck="false" placeholder="Ej. 123456"
-                   value="${esc(cred.id_alumno || '')}">
-          </div>
-          <div class="campo">
-            <label for="pin">PIN</label>
-            <input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="••••"
-                   value="${esc(cred.pin || '')}">
-          </div>
+        <div class="campo">
+          <label for="id-alumno">Email de TecnoCampus</label>
+          <input id="id-alumno" type="email" autocapitalize="none" spellcheck="false" autocomplete="email"
+                 placeholder="nombre@tecnocampus.cat" value="${esc(cred.id_alumno || '')}">
         </div>
         <label class="check"><input type="checkbox" id="recordar" ${cred.id_alumno || !hayNotas ? 'checked' : ''}>
-          Recordar mi id y PIN en este dispositivo</label>
+          Recordar mi email en este dispositivo</label>
         ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
         <button class="btn bloque" type="submit" id="btn-entrar">Entrar ${ICONOS.flecha}</button>
         <button type="button" class="btn secundario bloque" id="btn-registro">¿Primera vez? Regístrate</button>
-        <p class="sub">¿El profesor ya te ha dado de alta? La primera vez escribe tu email, deja el PIN vacío y pulsa Entrar.</p>
         ${hayNotas ? '<button type="button" class="btn-link" id="btn-notas">Ver mis notas y clasificación</button>' : ''}
       </form>
     </div>`;
@@ -767,11 +720,16 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
   const enviar = async () => {
     $boton.disabled = true;
     $boton.textContent = 'Entrando…';
-    const escrito = { id_alumno: $form.querySelector('#id-alumno').value, pin: $form.querySelector('#pin').value };
+    const escrito = { id_alumno: $form.querySelector('#id-alumno').value };
     const recordar = $form.querySelector('#recordar').checked;
-    const err = await entrar($codigo.value, escrito.id_alumno, escrito.pin, recordar);
-    if (err?.sinPin !== undefined) {
-      pintarElegirPin({ codigo: $codigo.value.toUpperCase(), idAlumno: escrito.id_alumno.trim(), nombre: err.sinPin, recordar });
+    const err = await entrar($codigo.value, escrito.id_alumno, recordar);
+    if (err?.noEsta) {
+      const email = escrito.id_alumno.includes('@') ? escrito.id_alumno.trim() : '';
+      pintarRegistro({
+        codigo: $codigo.value.toUpperCase(),
+        error: 'Ese email no está en el grupo. Si es tu primera vez, escribe tu nombre y apellidos.',
+        escrito: { email },
+      });
     } else if (err) pintarEntrada({ codigo: $codigo.value.toUpperCase(), error: err, escrito });
   };
   $form.onsubmit = (e) => { e.preventDefault(); enviar(); };
@@ -780,9 +738,8 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
     const leido = await escanearQR();
     if (!leido) return;
     $codigo.value = leido;
-    const listo = $form.querySelector('#id-alumno').value && /^\d{4}$/.test($form.querySelector('#pin').value);
-    if (listo) enviar();
-    else $form.querySelector($form.querySelector('#id-alumno').value ? '#pin' : '#id-alumno').focus();
+    if ($form.querySelector('#id-alumno').value.trim()) enviar();
+    else $form.querySelector('#id-alumno').focus();
   };
   $form.querySelector('#btn-notas')?.addEventListener('click', () => pintarHistorial());
   $form.querySelector('#btn-registro').onclick = () => pintarRegistro({ codigo: $codigo.value.toUpperCase() });
@@ -806,45 +763,6 @@ function heroHTML() {
     </section>`;
 }
 
-function pintarElegirPin({ codigo, idAlumno, nombre, recordar, error = '' }) {
-  vista = 'elegir-pin';
-  ponerVista('portada');
-  $app.innerHTML = `
-    <div class="portada">
-      ${heroHTML()}
-      <form class="tarjeta-entrar" id="form-elegir-pin" novalidate autocomplete="off">
-        <div class="cabeza">
-          <p class="antetitulo">Primera vez</p>
-          <h2>Elige tu PIN</h2>
-          <span class="raya" aria-hidden="true"></span>
-        </div>
-        <p class="sub">Hola, <b>${esc(nombre)}</b><br>Elige un PIN de 4 cifras: a partir de ahora entrarás con tu email y este PIN.</p>
-        <div class="fila">
-          <div class="campo"><label for="pin">Elige un PIN</label>
-            <input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="4 cifras"></div>
-          <div class="campo"><label for="pin2">Repite el PIN</label>
-            <input id="pin2" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="4 cifras"></div>
-        </div>
-        ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
-        <button class="btn bloque" type="submit" id="btn-guardar-pin">Guardar PIN y entrar ${ICONOS.flecha}</button>
-        <button type="button" class="btn-link" id="btn-volver">No soy yo · volver</button>
-      </form>
-    </div>`;
-  const $f = $app.querySelector('form');
-  $f.querySelector('#pin').focus();
-  $f.querySelector('#btn-volver').onclick = () => pintarEntrada({ codigo, escrito: { id_alumno: '', pin: '' } });
-  $f.onsubmit = async (e) => {
-    e.preventDefault();
-    const $b = $f.querySelector('#btn-guardar-pin');
-    $b.disabled = true;
-    $b.textContent = 'Guardando…';
-    const res = await elegirPin(codigo, idAlumno, $f.querySelector('#pin').value, $f.querySelector('#pin2').value, recordar);
-    if (!res) return;
-    if (res.volver) return pintarEntrada({ codigo, error: res.volver, escrito: { id_alumno: idAlumno, pin: '' } });
-    pintarElegirPin({ codigo, idAlumno, nombre, recordar, error: res.error });
-  };
-}
-
 function pintarRegistro({ codigo = '', error = '', escrito = {} } = {}) {
   vista = 'registro';
   ponerVista('portada');
@@ -857,7 +775,7 @@ function pintarRegistro({ codigo = '', error = '', escrito = {} } = {}) {
           <h2>Regístrate</h2>
           <span class="raya" aria-hidden="true"></span>
         </div>
-        <p class="sub">Solo una vez. Te daremos un id para siempre y entrarás directamente.</p>
+        <p class="sub">Solo una vez. Después entrarás solo con tu email.</p>
         <div class="campo">
           <label for="codigo">Código de la sesión</label>
           <input id="codigo" class="codigo-input" inputmode="text" maxlength="6" autocapitalize="characters"
@@ -872,15 +790,9 @@ function pintarRegistro({ codigo = '', error = '', escrito = {} } = {}) {
         <div class="campo"><label for="email">Email de TecnoCampus</label>
           <input id="email" type="email" autocapitalize="none" spellcheck="false" autocomplete="email"
                  placeholder="nombre@tecnocampus.cat" value="${esc(escrito.email || '')}"></div>
-        <div class="fila">
-          <div class="campo"><label for="pin">Elige un PIN</label>
-            <input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="4 cifras"></div>
-          <div class="campo"><label for="pin2">Repite el PIN</label>
-            <input id="pin2" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="4 cifras"></div>
-        </div>
         ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
         <button class="btn bloque" type="submit" id="btn-registrar">Registrarme y entrar ${ICONOS.flecha}</button>
-        <button type="button" class="btn-link" id="btn-volver">Ya tengo id · volver</button>
+        <button type="button" class="btn-link" id="btn-volver">Ya estoy registrado · volver</button>
       </form>
     </div>`;
   const $f = $app.querySelector('form');
@@ -894,15 +806,8 @@ function pintarRegistro({ codigo = '', error = '', escrito = {} } = {}) {
     const $b = $f.querySelector('#btn-registrar');
     $b.disabled = true;
     $b.textContent = 'Registrando…';
-    const res = await registrar(val('#codigo'), datos.nombre, datos.apellidos, datos.email, val('#pin'), val('#pin2'));
+    const res = await registrar(val('#codigo'), datos.nombre, datos.apellidos, datos.email);
     if (!res) return;
-    if (res.yaRegistrado) {
-      return pintarEntrada({
-        codigo: $codigo.value,
-        error: `Ya estabas registrado. Tu id es ${res.yaRegistrado}: entra con él y tu PIN. Si no recuerdas el PIN, pídeselo al profesor.`,
-        escrito: { id_alumno: res.yaRegistrado, pin: '' },
-      });
-    }
     pintarRegistro({ codigo: $codigo.value, error: res.error, escrito: datos });
   };
 }

@@ -14,7 +14,7 @@ Los alumnos responden desde el móvil con tiempo por pregunta. Cada sesión da u
 
 1. **Preguntas** → Importar tu banco (Moodle XML, CSV `enunciado;A;B;C;D;E;correcta;explicacion;etiquetas` o JSON). Siempre 5 opciones. Ejemplo: `preguntas_ejemplo.csv`.
 2. **Sesiones → Nueva sesión**: grupo, modo (calendario fijo en pista / manual), tiempo y pausa, preguntas a mano o N al azar de una etiqueta → *Guardar y lanzar*.
-3. **Proyector**: QR + código. Los alumnos entran (la primera vez se registran: nombre, apellidos, email de TecnoCampus y PIN; reciben un id de 6 cifras para siempre). Pulsa *Empezar*.
+3. **Proyector**: QR + código. Los alumnos entran (la primera vez se registran: nombre, apellidos y email de TecnoCampus; después entran solo con el email). Pulsa *Empezar*.
    En cuanto han respondido todos los que han entrado, la pregunta se cierra sin esperar al reloj (en calendario fijo se adelanta todo lo que viene detrás). Si alguien entró y dejó el móvil, se espera al reloj.
 4. Al acabar, *Terminar y guardar notas*: ranking del día y clasificación del grupo.
 5. **Notas**: por sesión (revisar respuestas sincronizadas tarde), trimestre (descartar peores, ausencias como 0) → *Exportar CSV para Moodle*.
@@ -65,13 +65,11 @@ En el editor de cada pregunta (*Preguntas → Editar*):
 ## Cómo entra el alumno
 
 1. Escanea el QR del proyector con la cámara del móvil (abre la web con el código puesto), o pulsa **Escanear QR** en la app, o hace una foto al QR, o escribe el código de 6 caracteres.
-2. Pone su id o su email y su PIN de 4 cifras. Puede marcar "Recordar en este móvil".
+2. Pone su email de TecnoCampus (sin PIN ni contraseña). Puede marcar "Recordar mi email en este dispositivo".
 
-De dónde sale el PIN:
-
-- **Importado por el profesor** (CSV o participantes de Moodle): la primera vez entra con su email y el PIN vacío, ve su nombre ("Hola, Laia S.") y elige su PIN. Solo se puede con una sesión abierta y solo si aún no tiene PIN.
-- **No está en la lista**: se registra solo (nombre, apellidos, email de TecnoCampus y PIN). Si se registra con el email de un importado sin PIN, se queda esa ficha.
-- **Lo olvida, o se lo quedó otro**: el profesor pulsa *Quitar PIN* y lo vuelve a elegir al entrar. *Generar PIN* sigue disponible para repartirlos en papel.
+- **Importado por el profesor** (CSV o participantes de Moodle): entra directamente con su email.
+- **No está en la lista**: al poner un email que no está en el grupo pasa al registro (nombre, apellidos y email de TecnoCampus). Si el email ya estaba, entra con esa ficha y no se crea otra.
+- Desde el 28-10-2026 no hay PIN: quien sepa el email de un compañero y tenga el código de la sesión puede entrar por él. Los botones de PIN del panel ya no tienen efecto.
 
 ## Qué pasa si se cae la red
 
@@ -86,7 +84,7 @@ Al publicar cambios en la app, sube `VERSION` en `sw.js` para que los móviles s
 ## Cómo funciona la seguridad
 
 - **Profesor**: usuario de Supabase Auth dado de alta en la tabla `profesores`. Ve y edita todo vía RLS.
-- **Alumno**: no tiene cuenta. Entra con código de sesión + `id_alumno` + PIN de 4 cifras.
+- **Alumno**: no tiene cuenta. Entra con código de sesión + su email (o `id_alumno`), sin PIN.
   Usa la clave pública (rol `anon`), que **no puede leer ninguna tabla** salvo `sesiones_vivo` (solo turno y horas, sin preguntas ni respuestas).
   Todo lo hace con funciones RPC que validan un token de participación.
 - La columna `correcta` nunca es accesible al alumno. Solo ve la correcta de una pregunta cuando su ventana + 2 s ha cerrado (si el orden está barajado, al final de la sesión).
@@ -119,7 +117,7 @@ Se puede lanzar a mano desde la pestaña Actions → *Mantener Supabase activo* 
 
 ## Tests del esquema
 
-Ejecutan `schema.sql` en Postgres en memoria (PGlite) y prueban permisos, PIN, ventanas de tiempo, respuestas tardías, idempotencia y notas.
+Ejecutan `schema.sql` en Postgres en memoria (PGlite) y prueban permisos, entrada por email, ventanas de tiempo, respuestas tardías, idempotencia y notas.
 
 ```bash
 npm install

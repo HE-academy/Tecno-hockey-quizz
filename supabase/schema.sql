@@ -520,6 +520,8 @@ begin
     return jsonb_build_object('ok', false, 'error', 'codigo');
   end if;
 
+  -- Se entra solo con el email (o el id): el PIN ya no se pide y p_pin se
+  -- ignora (se mantiene el parámetro para no romper móviles con la versión vieja).
   select * into a from public.alumnos
   where grupo_id = s.grupo_id
     and (id_alumno = trim(p_id_alumno) or lower(email) = lower(trim(p_id_alumno)))
@@ -527,34 +529,6 @@ begin
   if not found then
     return jsonb_build_object('ok', false, 'error', 'credenciales');
   end if;
-
-  if a.bloqueado_hasta is not null and a.bloqueado_hasta > now() then
-    return jsonb_build_object('ok', false, 'error', 'bloqueado', 'hasta', a.bloqueado_hasta);
-  end if;
-
-  -- Importado por el profesor y aún sin PIN: lo elige al entrar (elegir_pin).
-  -- Nombre + inicial para que confirme que es él antes de quedarse la cuenta.
-  if a.pin_hash is null then
-    return jsonb_build_object('ok', false, 'error', 'sin_pin',
-      'nombre', a.nombre || case when a.apellidos <> '' then ' ' || left(a.apellidos, 1) || '.' else '' end);
-  end if;
-
-  -- Un PIN mal formado (vacío) no es un intento: no cuenta para el bloqueo.
-  if coalesce(p_pin, '') !~ '^[0-9]{4}$' then
-    return jsonb_build_object('ok', false, 'error', 'credenciales');
-  end if;
-
-  if a.pin_hash <> extensions.crypt(p_pin, a.pin_hash) then
-    -- 5 fallos seguidos bloquean 5 minutos (10.000 PIN posibles).
-    update public.alumnos
-       set intentos_fallidos = case when intentos_fallidos + 1 >= 5 then 0 else intentos_fallidos + 1 end,
-           bloqueado_hasta   = case when intentos_fallidos + 1 >= 5 then now() + interval '5 minutes'
-                                    else bloqueado_hasta end
-     where id = a.id;
-    return jsonb_build_object('ok', false, 'error', 'credenciales');
-  end if;
-
-  update public.alumnos set intentos_fallidos = 0, bloqueado_hasta = null where id = a.id;
 
   if s.barajar_preguntas then
     select array_agg(posicion order by random()) into v_orden
@@ -600,8 +574,8 @@ end;
 $$;
 
 -- Autoinscripción: el alumno se da de alta en el grupo de la sesión cuyo
--- código tiene (solo con sesión abierta y email de TecnoCampus), elige su PIN
--- y recibe un id de 6 cifras para siempre. Después entra como unirse_sesion.
+-- código tiene (solo con sesión abierta y email de TecnoCampus) y recibe un id
+-- de 6 cifras. Después entra solo con su email. p_pin se ignora.
 create function public.registrar_alumno(
   p_codigo text, p_nombre text, p_apellidos text, p_email text, p_pin text)
 returns jsonb
@@ -626,21 +600,13 @@ begin
   if v_email !~ '^[^@\s]+@([a-z0-9-]+\.)*tecnocampus\.cat$' then
     return jsonb_build_object('ok', false, 'error', 'email');
   end if;
-  if coalesce(p_pin, '') !~ '^[0-9]{4}$' then
-    return jsonb_build_object('ok', false, 'error', 'pin');
-  end if;
-
+  -- Ya estaba (registrado antes o importado por el profesor): entra con su
+  -- ficha, sin pisar el nombre de la lista del profesor.
   select * into v_existente from public.alumnos
   where grupo_id = s.grupo_id and lower(email) = v_email;
   if found then
-    -- Importado por el profesor y sin PIN: se queda con el que elige ahora
-    -- (nombre y apellidos, los de la lista del profesor).
-    if v_existente.pin_hash is null then
-      return public.elegir_pin(p_codigo, v_existente.id_alumno, p_pin)
-             || jsonb_build_object('nuevo_id', v_existente.id_alumno);
-    end if;
-    -- El id no es secreto (el PIN sí): se le recuerda para que entre.
-    return jsonb_build_object('ok', false, 'error', 'ya_registrado', 'id_alumno', v_existente.id_alumno);
+    return public.unirse_sesion(p_codigo, v_existente.id_alumno, null)
+           || jsonb_build_object('nuevo_id', v_existente.id_alumno);
   end if;
   -- Freno a altas masivas con un código filtrado.
   if (select count(*) from public.alumnos where grupo_id = s.grupo_id) >= 150 then
@@ -652,11 +618,10 @@ begin
     exit when not exists (select 1 from public.alumnos where id_alumno = v_id);
   end loop;
 
-  insert into public.alumnos (grupo_id, id_alumno, nombre, apellidos, email, pin_hash)
-  values (s.grupo_id, v_id, v_nombre, v_apellidos, v_email,
-          extensions.crypt(p_pin, extensions.gen_salt('bf', 8)));
+  insert into public.alumnos (grupo_id, id_alumno, nombre, apellidos, email)
+  values (s.grupo_id, v_id, v_nombre, v_apellidos, v_email);
 
-  return public.unirse_sesion(p_codigo, v_id, p_pin) || jsonb_build_object('nuevo_id', v_id);
+  return public.unirse_sesion(p_codigo, v_id, null) || jsonb_build_object('nuevo_id', v_id);
 end;
 $$;
 
