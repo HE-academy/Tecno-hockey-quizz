@@ -100,8 +100,15 @@ function selectorGrupo(grupos, actual, id = 'sel-grupo') {
 // ---------------------------------------------------------------- arranque y acceso
 
 async function iniciar() {
+  // El enlace del correo vuelve con la sesión (o el error) en el hash, que es
+  // también el del enrutador: se lee aquí y se limpia antes de enrutar.
+  const vuelta = new URLSearchParams(location.hash.slice(1));
   const { data: { session } } = await sb.auth.getSession();
-  if (!session) return vistaLogin();
+  if (vuelta.has('access_token') || vuelta.has('error_code')) history.replaceState(null, '', location.pathname);
+  if (!session) {
+    const caducado = vuelta.get('error_code') === 'otp_expired';
+    return vistaLogin(vuelta.has('error_code') ? (caducado ? 'El enlace ha caducado o ya se usó. Pide otro.' : 'No se ha podido entrar con ese enlace. Pide otro.') : '');
+  }
   let esProfe = false;
   try { esProfe = await q(sb.rpc('es_profe')); } catch { /* sin red */ }
   if (!esProfe) return vistaNoAutorizado(session.user.email);
@@ -113,28 +120,46 @@ async function iniciar() {
 }
 let iniciado = false;
 
-function vistaLogin(error = '') {
+// Sin contraseña: Supabase manda un enlace al correo. shouldCreateUser: false
+// para que nadie se cree un usuario desde aquí.
+function vistaLogin(error = '', email = '') {
   $nav.hidden = true;
   $app.innerHTML = `
     <form class="caja login pantalla" id="form-login">
       <h1>Acceso <b>profesor</b></h1>
-      <div class="campo"><label for="email">Email</label><input id="email" type="email" autocomplete="username" required></div>
-      <div class="campo"><label for="pass">Contraseña</label><input id="pass" type="password" autocomplete="current-password" required></div>
+      <div class="campo"><label for="email">Email</label><input id="email" type="email" autocomplete="username" required value="${esc(email)}"></div>
       ${error ? `<p class="error">${esc(error)}</p>` : ''}
-      <button class="btn bloque" type="submit">Entrar</button>
-      <p class="ayuda">¿Primera vez? Crea tu usuario en Supabase → Authentication → Users → Add user.
-        El primer usuario creado queda como profesor.</p>
+      <button class="btn bloque" type="submit">Enviarme el enlace</button>
+      <p class="ayuda">Te llega un correo con un enlace para entrar. Ábrelo en este mismo navegador.</p>
     </form>`;
   $app.querySelector('form').onsubmit = async (e) => {
     e.preventDefault();
     const boton = e.target.querySelector('button');
     boton.disabled = true;
-    const { error: err } = await sb.auth.signInWithPassword({
-      email: e.target.email.value.trim(), password: e.target.pass.value,
+    const correo = e.target.email.value.trim().toLowerCase();
+    const { error: err } = await sb.auth.signInWithOtp({
+      email: correo,
+      options: { shouldCreateUser: false, emailRedirectTo: location.origin + location.pathname },
     });
-    if (err) return vistaLogin(/invalid/i.test(err.message) ? 'Email o contraseña incorrectos.' : err.message);
-    iniciar();
+    if (err) {
+      const msg = /signups not allowed|not found/i.test(err.message) ? 'Ese email no tiene acceso de profesor.'
+        : err.status === 429 || /rate limit|security purposes/i.test(err.message) ? 'Ya se ha enviado un enlace hace poco. Espera un minuto y vuelve a pedirlo.'
+          : err.message;
+      return vistaLogin(msg, correo);
+    }
+    vistaEnlaceEnviado(correo);
   };
+}
+
+function vistaEnlaceEnviado(email) {
+  $app.innerHTML = `
+    <div class="caja login pantalla">
+      <h1>Mira tu <b>correo</b></h1>
+      <p>Hemos enviado un enlace a <b>${esc(email)}</b>. Ábrelo y entrarás directamente.</p>
+      <p class="ayuda">Si no llega en un par de minutos, mira en spam.</p>
+      <button class="btn secundario" type="button" id="b-otro">Usar otro email</button>
+    </div>`;
+  $app.querySelector('#b-otro').onclick = () => vistaLogin('', email);
 }
 
 function vistaNoAutorizado(email) {
