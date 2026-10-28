@@ -682,6 +682,8 @@ function pintarEntrada({ codigo = '', error = '', escrito = null } = {}) {
   vista = 'entrada';
   ponerVista('portada');
   const cred = escrito || lsGet(LS_CRED) || {};
+  // Un id de 6 cifras recordado de la versión con PIN no se enseña: se pide el email.
+  if (!escrito && !String(cred.id_alumno || '').includes('@')) cred.id_alumno = '';
   const hayNotas = !!lsGet(LS_TOKEN);
   $app.innerHTML = `
     <div class="portada">
