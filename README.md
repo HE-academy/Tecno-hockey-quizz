@@ -98,8 +98,7 @@ Al publicar cambios en la app, sube `VERSION` en `sw.js` para que los móviles s
 1. Crea un proyecto nuevo en [supabase.com](https://supabase.com) (plan gratuito).
 2. SQL Editor → pega y ejecuta `supabase/schema.sql` entero.
 3. Authentication → Sign In / Providers → desactiva **Allow new users to sign up**.
-4. Authentication → Users → **Add user** con tu email (la contraseña no se usa: el profesor entra con un enlace que le llega al correo).
-   Authentication → URL Configuration → **Site URL** = la de GitHub Pages, para que el enlace vuelva a `profe.html`.
+4. Authentication → Users → **Add user** con tu email y contraseña.
 5. SQL Editor → date de alta como profesor:
    ```sql
    insert into public.profesores (user_id, email)
